@@ -27,6 +27,7 @@ struct VoiceParams
     std::atomic<float>* root = nullptr;
     std::atomic<float>* cutoff = nullptr;
     std::atomic<float>* resonance = nullptr;
+    std::atomic<float>* velSens = nullptr;
 };
 
 //==============================================================================

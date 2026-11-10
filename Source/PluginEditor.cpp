@@ -125,6 +125,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
         { "release",   "Release" },
         { "cutoff",    "Filtro" },
         { "resonance", "Resson\xc3\xa2" "ncia" },
+        { "velsens",   "Sensibilidade" },
         { "gain",      "Volume" } };
 
     for (auto& d : defs)

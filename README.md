@@ -14,6 +14,7 @@ Em **Releases**, à direita desta página, fica sempre a última compilação:
 - Descobre a nota original do som, pelo nome do arquivo (`Rhodes_C4.wav`) ou pela análise do áudio
 - Toca o som em qualquer nota, pelo teclado MIDI, pelo piano roll ou pelo teclado da tela
 - Envelope ADSR, filtro passa-baixa com ressonância, afinação e volume
+- Sensibilidade à força da tecla (em 0%, toda nota sai no volume cheio)
 - O projeto do Reaper guarda o som carregado e a posição dos botões
 
 ## O que ainda não faz

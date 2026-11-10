@@ -38,7 +38,9 @@ void DrikVoice::startNote (int midiNote, float velocity, juce::SynthesiserSound*
     updateRatio();
 
     position = 0.0;
-    velocityGain = velocity;
+    // Sensibilidade: 100% = a forca da tecla manda no volume; 0% = toda nota sai no volume cheio.
+    const float sens = juce::jlimit (0.0f, 1.0f, params.velSens->load());
+    velocityGain = 1.0f - sens + sens * velocity;
 
     adsr.setParameters ({ params.attack->load(), params.decay->load(), params.sustain->load(), params.release->load() });
     adsr.reset();
@@ -170,6 +172,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrikSamplerProcessor::create
     layout.add (std::make_unique<Float> (juce::ParameterID { "gain", 1 }, "Gain", Range (-36.0f, 12.0f, 0.1f), 0.0f,
                                          Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1) + " dB"; })));
 
+    layout.add (std::make_unique<Float> (juce::ParameterID { "velsens", 1 }, "Velocity Sensitivity", Range (0.0f, 1.0f, 0.0f), 1.0f,
+                                         Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; })));
+
     layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { "root", 1 }, "Root Note", 0, 127, 60,
                                                            juce::AudioParameterIntAttributes()
                                                                .withStringFromValueFunction ([] (int v, int) { return noteName (v); })));
@@ -192,6 +197,7 @@ DrikSamplerProcessor::DrikSamplerProcessor()
     voiceParams.root      = apvts.getRawParameterValue ("root");
     voiceParams.cutoff    = apvts.getRawParameterValue ("cutoff");
     voiceParams.resonance = apvts.getRawParameterValue ("resonance");
+    voiceParams.velSens   = apvts.getRawParameterValue ("velsens");
 
     for (int i = 0; i < 24; ++i)
         synth.addVoice (new DrikVoice (voiceParams));

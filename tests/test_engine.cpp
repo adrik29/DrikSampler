@@ -89,6 +89,23 @@ int main()
         auto longTail = render (p, {}, 8.0, sr, block);
         check (peakOf (longTail, longTail.size() - 4800) == 0.0f, "nota presa termina sozinha no fim do sample");
 
+        // Sensibilidade a forca da tecla.
+        auto playSoft = [&] (float sens)
+        {
+            p.apvts.getParameter ("velsens")->setValueNotifyingHost (sens);
+            juce::MidiBuffer soft, stop;
+            soft.addEvent (juce::MidiMessage::noteOn (1, 57, 0.2f), 0);
+            auto v = render (p, soft, 0.3, sr, block);
+            stop.addEvent (juce::MidiMessage::noteOff (1, 57), 0);
+            render (p, stop, 1.0, sr, block);
+            return peakOf (v);
+        };
+        const float softFull = playSoft (1.0f), softNone = playSoft (0.0f), softHalf = playSoft (0.5f);
+        check (softFull > 0.07f && softFull < 0.13f, "sensibilidade 100%: tecla fraca (20%) sai baixa");
+        check (softNone > 0.45f, "sensibilidade 0%: tecla fraca sai no volume cheio");
+        check (softHalf > softFull * 2.0f && softHalf < softNone * 0.8f, "sensibilidade 50%: fica no meio");
+        p.apvts.getParameter ("velsens")->setValueNotifyingHost (1.0f);
+
         juce::MidiBuffer chord;
         for (int n = 40; n < 80; ++n) chord.addEvent (juce::MidiMessage::noteOn (1, n, 1.0f), 0);
         auto c = render (p, chord, 0.3, sr, block);
