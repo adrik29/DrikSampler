@@ -134,6 +134,8 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     keyboard.setAvailableRange (12, 120);
     keyboard.setOctaveForMiddleC (4);
     keyboard.setKeyWidth (14.0f);
+    // Clique do mouse sempre com forca total (o padrao do JUCE varia a forca conforme a altura do clique na tecla).
+    keyboard.setVelocity (1.0f, false);
     keyboard.setLowestVisibleKey (24);
     keyboard.setColour (juce::MidiKeyboardComponent::keyDownOverlayColourId, accentColour);
     keyboard.setColour (juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, accentColour.withAlpha (0.4f));
