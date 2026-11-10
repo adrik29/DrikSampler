@@ -7,7 +7,7 @@ Sampler VST3 para o Reaper (Windows). Arraste um som, veja a onda, toque no tecl
 Em **Releases**, à direita desta página, fica sempre a última compilação:
 `DrikSampler-Windows.zip`. As instruções de instalação estão no `LEIA-ME-instalacao.txt` dentro do zip.
 
-## O que a versão 0.1 faz
+## O que a versão atual faz
 
 - Carrega um arquivo de áudio (WAV, AIFF, FLAC, MP3) por arrastar e soltar ou pelo botão **Abrir...**
 - Mostra a onda

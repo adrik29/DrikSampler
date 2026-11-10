@@ -102,6 +102,13 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     title.setColour (juce::Label::textColourId, accentColour);
     addAndMakeVisible (title);
 
+    // Versao e data da compilacao, para saber de relance qual copia esta aberta.
+    versionLabel.setText (juce::String ("v") + DRIK_VERSION + "  (" + juce::Time::getCompilationDate().formatted ("%d/%m/%Y") + ")",
+                          juce::dontSendNotification);
+    versionLabel.setFont (juce::FontOptions (13.0f));
+    versionLabel.setColour (juce::Label::textColourId, dimColour);
+    addAndMakeVisible (versionLabel);
+
     fileLabel.setColour (juce::Label::textColourId, textColour);
     fileLabel.setFont (juce::FontOptions (15.0f));
     fileLabel.setJustificationType (juce::Justification::centredRight);
@@ -162,7 +169,8 @@ void DrikSamplerEditor::resized()
     auto area = getLocalBounds().reduced (14);
 
     auto top = area.removeFromTop (34);
-    title.setBounds (top.removeFromLeft (170));
+    title.setBounds (top.removeFromLeft (140));
+    versionLabel.setBounds (top.removeFromLeft (190).withTrimmedTop (5));
     openButton.setBounds (top.removeFromRight (90).reduced (0, 3));
     top.removeFromRight (10);
     fileLabel.setBounds (top);

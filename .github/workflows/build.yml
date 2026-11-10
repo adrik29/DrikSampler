@@ -43,10 +43,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $versao = (Select-String -Path CMakeLists.txt -Pattern 'project\(DrikSampler VERSION ([0-9.]+)').Matches[0].Groups[1].Value
           gh release delete ultima-compilacao --cleanup-tag --yes 2>$null
           $global:LASTEXITCODE = 0
           gh release create ultima-compilacao DrikSampler-Windows.zip `
             --target $env:GITHUB_SHA `
-            --title "DrikSampler - ultima compilacao" `
-            --notes "Gerado automaticamente a partir de $env:GITHUB_SHA. Instrucoes no LEIA-ME dentro do zip." `
+            --title "DrikSampler v$versao" `
+            --notes "Versao $versao. Gerado automaticamente a partir de $env:GITHUB_SHA. Instrucoes no LEIA-ME dentro do zip." `
             --prerelease

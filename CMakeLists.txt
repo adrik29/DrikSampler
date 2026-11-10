@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.22)
 # Runtime estatico no Windows: o plugin nao depende de instalar o "VC++ Redistributable".
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(DrikSampler VERSION 0.1.0 LANGUAGES C CXX)
+# A versao e definida so aqui; ela aparece na janela do plugin e no Reaper.
+project(DrikSampler VERSION 0.1.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +39,8 @@ target_compile_definitions(DrikSampler PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0)
+    JUCE_DISPLAY_SPLASH_SCREEN=0
+    DRIK_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(DrikSampler
     PRIVATE
@@ -56,6 +58,7 @@ if(DRIK_BUILD_TESTS)
         tests/test_engine.cpp
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp)
-    target_compile_definitions(DrikEngineTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_compile_definitions(DrikEngineTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+        DRIK_VERSION="${PROJECT_VERSION}")
     target_link_libraries(DrikEngineTest PRIVATE juce::juce_audio_utils juce::juce_dsp)
 endif()

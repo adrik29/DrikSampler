@@ -62,7 +62,7 @@ private:
 
     DrikSamplerProcessor& processor;
 
-    juce::Label title, fileLabel;
+    juce::Label title, versionLabel, fileLabel;
     juce::TextButton openButton;
     WaveformView waveform;
     juce::OwnedArray<Knob> knobs;
