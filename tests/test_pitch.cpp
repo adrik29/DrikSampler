@@ -38,6 +38,31 @@ int main()
     for (auto& x : noise) { s = s * 1664525u + 1013904223u; x = (float) ((s >> 8) / 8388608.0 - 1.0); }
     if (drik::detectPitchHz (noise.data(), (int) noise.size(), 44100.0) != 0.0) { ++fails; std::printf ("FALHA ruido\n"); }
 
+    // Som comprido de uma nota so: confia. Trecho com notas mudando: nao confia.
+    {
+        const double sr = 44100.0;
+        std::vector<float> steady ((size_t) (sr * 8.0)), tune ((size_t) (sr * 8.0)), padded;
+        const int melody[] = { 45, 52, 48, 57, 50, 43, 55, 47 };
+        for (size_t i = 0; i < steady.size(); ++i)
+        {
+            const double t = (double) i / sr;
+            steady[i] = (float) (0.5 * std::sin (2 * M_PI * 196.0 * t) * std::exp (-0.4 * t));
+            const int n1 = melody[(int) t % 8], n2 = melody[((int) t + 3) % 8] + 12;
+            tune[i] = (float) (0.3 * std::sin (2 * M_PI * 440.0 * std::pow (2.0, (n1 - 69) / 12.0) * t)
+                             + 0.3 * std::sin (2 * M_PI * 440.0 * std::pow (2.0, (n2 - 69) / 12.0) * t));
+        }
+        if (drik::detectNote (steady.data(), (int) steady.size(), sr) != 55) { ++fails; std::printf ("FALHA nota longa estavel\n"); }
+        if (drik::detectNote (tune.data(), (int) tune.size(), sr) != -1)     { ++fails; std::printf ("FALHA trecho de musica deveria dar -1, deu %d\n", drik::detectNote (tune.data(), (int) tune.size(), sr)); }
+
+        padded.assign ((size_t) (sr * 0.5), 0.0f);
+        padded.insert (padded.end(), steady.begin(), steady.begin() + (long) sr);
+        padded.insert (padded.end(), (size_t) (sr * 0.25), 0.0f);
+        int a = 0, b = 0;
+        const bool ok = drik::findSoundBounds (padded.data(), (int) padded.size(), sr, a, b);
+        if (! ok || std::abs (a - (int) (sr * 0.5)) > 200 || std::abs (b - (int) (sr * 1.5)) > 700)
+        { ++fails; std::printf ("FALHA corte de silencio: %d..%d\n", a, b); }
+    }
+
     struct { const char* name; int want; } names[] = {
         { "Rhodes_C4", 60 }, { "strings F#2", 42 }, { "pad-Bb3", 58 }, { "A0", 21 }, { "moog_c-1", 0 },
         { "Solina Strings", -1 }, { "take12", -1 }, { "Bass_E1_v2", 28 }, { "DX7 EPiano", -1 }, { "Juno_G#5_loud", 80 } };

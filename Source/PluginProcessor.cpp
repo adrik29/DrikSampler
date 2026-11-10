@@ -37,7 +37,7 @@ void DrikVoice::startNote (int midiNote, float velocity, juce::SynthesiserSound*
     bendSemis = ((double) pitchWheel - 8192.0) / 8192.0 * 2.0;
     updateRatio();
 
-    position = 0.0;
+    position = (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) sound->length;
     // Sensibilidade: 100% = a forca da tecla manda no volume; 0% = toda nota sai no volume cheio.
     const float sens = juce::jlimit (0.0f, 1.0f, params.velSens->load());
     velocityGain = 1.0f - sens + sens * velocity;
@@ -88,19 +88,63 @@ void DrikVoice::renderNextBlock (juce::AudioBuffer<float>& out, int startSample,
     filter.setCutoffFrequency (juce::jlimit (20.0f, maxCutoff, params.cutoff->load()));
     filter.setResonance (juce::jlimit (0.3f, 12.0f, params.resonance->load()));
 
+    // Trecho tocado: entre os marcadores de inicio e fim (lidos a cada bloco, entao
+    // arrastar um marcador com a nota soando ja vale na hora).
+    const double startS = (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) length;
+    const double endS   = juce::jlimit (startS + 2.0, (double) length, (double) params.end->load() * (double) length);
+    const bool looping  = params.loop->load() > 0.5f && endS - startS > 8.0;
+
+    // Emenda do loop: nos ultimos X samples antes do fim, o som vai dando lugar ao comeco.
+    const double xfade = looping ? juce::jlimit (0.0, (endS - startS) * 0.5,
+                                                 (double) params.xfadeMs->load() * 0.001 * sound->sourceRate)
+                                 : 0.0;
+    const double fadeOut = 64.0;   // sem loop: desce rapido no fim para nao estalar
+
+    auto read = [inL, inR] (double pos, float& l, float& r)
+    {
+        const int idx = (int) pos;
+        const float frac = (float) (pos - (double) idx);
+        l = inL[idx] + frac * (inL[idx + 1] - inL[idx]);
+        r = inR[idx] + frac * (inR[idx + 1] - inR[idx]);
+    };
+
     for (int i = 0; i < numSamples; ++i)
     {
-        const int idx = (int) position;
-        if (idx >= length - 1)
+        if (position >= endS)
         {
-            adsr.reset();
-            clearCurrentNote();
-            break;
+            if (! looping)
+            {
+                adsr.reset();
+                clearCurrentNote();
+                break;
+            }
+
+            const double span = juce::jmax (1.0, endS - startS - xfade);
+            position = startS + xfade + std::fmod (position - endS, span);
         }
 
-        const float frac = (float) (position - (double) idx);
-        float l = inL[idx] + frac * (inL[idx + 1] - inL[idx]);
-        float r = inR[idx] + frac * (inR[idx + 1] - inR[idx]);
+        float l, r;
+        read (position, l, r);
+
+        if (looping)
+        {
+            if (xfade >= 1.0 && position > endS - xfade)
+            {
+                const double t = (position - (endS - xfade)) / xfade;
+                float l2, r2;
+                read (startS + t * xfade, l2, r2);
+                const float gOld = (float) std::cos (t * juce::MathConstants<double>::halfPi);
+                const float gNew = (float) std::sin (t * juce::MathConstants<double>::halfPi);
+                l = l * gOld + l2 * gNew;
+                r = r * gOld + r2 * gNew;
+            }
+        }
+        else if (position > endS - fadeOut)
+        {
+            const float g = (float) juce::jmax (0.0, (endS - position) / fadeOut);
+            l *= g;
+            r *= g;
+        }
 
         const float env = adsr.getNextSample() * gain;
         l = filter.processSample (0, l) * env;
@@ -175,6 +219,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrikSamplerProcessor::create
     layout.add (std::make_unique<Float> (juce::ParameterID { "velsens", 1 }, "Velocity Sensitivity", Range (0.0f, 1.0f, 0.0f), 1.0f,
                                          Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; })));
 
+    layout.add (std::make_unique<Float> (juce::ParameterID { "start", 1 }, "Sample Start", Range (0.0f, 1.0f, 0.0f), 0.0f));
+    layout.add (std::make_unique<Float> (juce::ParameterID { "end", 1 },   "Sample End",   Range (0.0f, 1.0f, 0.0f), 1.0f));
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "loop", 1 }, "Loop", false));
+
+    Range xfadeRange (0.0f, 1000.0f, 0.0f);
+    xfadeRange.setSkewForCentre (100.0f);
+    layout.add (std::make_unique<Float> (juce::ParameterID { "xfade", 1 }, "Loop Crossfade", xfadeRange, 30.0f,
+                                         Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v)) + " ms"; })));
+
     layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { "root", 1 }, "Root Note", 0, 127, 60,
                                                            juce::AudioParameterIntAttributes()
                                                                .withStringFromValueFunction ([] (int v, int) { return noteName (v); })));
@@ -198,6 +251,10 @@ DrikSamplerProcessor::DrikSamplerProcessor()
     voiceParams.cutoff    = apvts.getRawParameterValue ("cutoff");
     voiceParams.resonance = apvts.getRawParameterValue ("resonance");
     voiceParams.velSens   = apvts.getRawParameterValue ("velsens");
+    voiceParams.start     = apvts.getRawParameterValue ("start");
+    voiceParams.end       = apvts.getRawParameterValue ("end");
+    voiceParams.loop      = apvts.getRawParameterValue ("loop");
+    voiceParams.xfadeMs   = apvts.getRawParameterValue ("xfade");
 
     for (int i = 0; i < 24; ++i)
         synth.addVoice (new DrikVoice (voiceParams));
@@ -226,7 +283,7 @@ void DrikSamplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 }
 
 //==============================================================================
-bool DrikSamplerProcessor::loadFile (const juce::File& file, bool detectRoot)
+bool DrikSamplerProcessor::loadFile (const juce::File& file, bool fresh)
 {
     if (! file.existsAsFile())
         return false;
@@ -235,7 +292,7 @@ bool DrikSamplerProcessor::loadFile (const juce::File& file, bool detectRoot)
     if (reader == nullptr || reader->lengthInSamples < 2 || reader->sampleRate <= 0.0)
         return false;
 
-    // Versao 1 carrega tudo na memoria; limita a 10 minutos por seguranca.
+    // Carrega tudo na memoria; limita a 10 minutos por seguranca.
     const auto maxLength = (juce::int64) (reader->sampleRate * 600.0);
     const int length = (int) juce::jmin (reader->lengthInSamples, maxLength);
     const int numCh = juce::jlimit (1, 2, (int) reader->numChannels);
@@ -249,27 +306,43 @@ bool DrikSamplerProcessor::loadFile (const juce::File& file, bool detectRoot)
     sound->length = length;
     sound->sourceRate = reader->sampleRate;
 
-    if (detectRoot)
+    if (fresh)
     {
+        auto setParam = [this] (const char* id, float value)
+        {
+            if (auto* p = apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+
+        std::vector<float> mono ((size_t) length);
+        for (int i = 0; i < length; ++i)
+        {
+            float v = sound->data.getSample (0, i);
+            if (numCh > 1)
+                v = 0.5f * (v + sound->data.getSample (1, i));
+            mono[(size_t) i] = v;
+        }
+
+        // 1. Marcadores: encostam onde o som realmente comeca e termina.
+        int first = 0, last = length;
+        if (! drik::findSoundBounds (mono.data(), length, reader->sampleRate, first, last))
+        {
+            first = 0;
+            last = length;
+        }
+        setParam ("start", (float) first / (float) length);
+        setParam ("end",   (float) last / (float) length);
+
+        // 2. Nota original: nome do arquivo; senao, analise do som; senao, C4.
         int root = drik::noteFromFilename (file.getFileNameWithoutExtension().toStdString());
 
         if (root < 0)
         {
-            const int analysed = juce::jmin (length, (int) (reader->sampleRate * 20.0));
-            std::vector<float> mono ((size_t) analysed);
-            for (int i = 0; i < analysed; ++i)
-            {
-                float v = sound->data.getSample (0, i);
-                if (numCh > 1)
-                    v = 0.5f * (v + sound->data.getSample (1, i));
-                mono[(size_t) i] = v;
-            }
-            root = drik::hzToMidiNote (drik::detectPitchHz (mono.data(), analysed, reader->sampleRate));
+            const int analysed = juce::jmin (last - first, (int) (reader->sampleRate * 30.0));
+            root = drik::detectNote (mono.data() + first, analysed, reader->sampleRate);
         }
 
-        if (root >= 0)
-            if (auto* p = apvts.getParameter ("root"))
-                p->setValueNotifyingHost (p->convertTo0to1 ((float) root));
+        setParam ("root", (float) (root >= 0 ? root : 60));
     }
 
     synth.clearSounds();

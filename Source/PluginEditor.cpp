@@ -13,13 +13,20 @@ namespace
 }
 
 //==============================================================================
-WaveformView::WaveformView (juce::AudioFormatManager& fm) : thumbnail (512, fm, cache)
+WaveformView::WaveformView (juce::AudioFormatManager& fm, juce::AudioProcessorValueTreeState& s)
+    : state (s), thumbnail (512, fm, cache)
 {
+    startParam = state.getParameter ("start");
+    endParam   = state.getParameter ("end");
+    loopValue  = state.getRawParameterValue ("loop");
+
     thumbnail.addChangeListener (this);
+    startTimerHz (30);
 }
 
 WaveformView::~WaveformView()
 {
+    stopTimer();
     thumbnail.removeChangeListener (this);
 }
 
@@ -39,17 +46,142 @@ void WaveformView::setDragHighlight (bool shouldHighlight)
     repaint();
 }
 
+void WaveformView::timerCallback()
+{
+    // Redesenha quando os marcadores mudam por fora (automacao, projeto reaberto, som novo).
+    const float s = startParam->getValue(), e = endParam->getValue(), l = loopValue->load();
+    if (s != lastStart || e != lastEnd || l != lastLoop)
+    {
+        lastStart = s; lastEnd = e; lastLoop = l;
+        repaint();
+    }
+}
+
+juce::Rectangle<float> WaveformView::waveArea() const
+{
+    return getLocalBounds().toFloat().reduced (10.0f, 6.0f);
+}
+
+float WaveformView::xFor (float normalised) const
+{
+    const auto area = waveArea();
+    return area.getX() + normalised * area.getWidth();
+}
+
+WaveformView::Marker WaveformView::markerAt (float x) const
+{
+    const float ds = std::abs (x - xFor (startParam->getValue()));
+    const float de = std::abs (x - xFor (endParam->getValue()));
+    const float reach = 9.0f;
+
+    if (ds > reach && de > reach)
+        return Marker::none;
+
+    // Com os dois juntos, escolhe pelo lado em que o mouse esta.
+    if (std::abs (ds - de) < 1.0f)
+        return x < xFor (startParam->getValue()) ? Marker::start : Marker::end;
+
+    return ds < de ? Marker::start : Marker::end;
+}
+
+void WaveformView::setMarker (Marker m, float normalised)
+{
+    const float minGap = 0.002f;
+
+    if (m == Marker::start)
+        startParam->setValueNotifyingHost (juce::jlimit (0.0f, juce::jmax (0.0f, endParam->getValue() - minGap), normalised));
+    else if (m == Marker::end)
+        endParam->setValueNotifyingHost (juce::jlimit (juce::jmin (1.0f, startParam->getValue() + minGap), 1.0f, normalised));
+}
+
+void WaveformView::mouseMove (const juce::MouseEvent& e)
+{
+    setMouseCursor (hasSound() && markerAt ((float) e.x) != Marker::none ? juce::MouseCursor::LeftRightResizeCursor
+                                                                         : juce::MouseCursor::NormalCursor);
+}
+
+void WaveformView::mouseDown (const juce::MouseEvent& e)
+{
+    if (! hasSound())
+        return;
+
+    dragging = markerAt ((float) e.x);
+
+    if (dragging == Marker::start) startParam->beginChangeGesture();
+    if (dragging == Marker::end)   endParam->beginChangeGesture();
+
+    mouseDrag (e);
+}
+
+void WaveformView::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging == Marker::none)
+        return;
+
+    const auto area = waveArea();
+    setMarker (dragging, ((float) e.x - area.getX()) / area.getWidth());
+}
+
+void WaveformView::mouseUp (const juce::MouseEvent&)
+{
+    if (dragging == Marker::start) startParam->endChangeGesture();
+    if (dragging == Marker::end)   endParam->endChangeGesture();
+    dragging = Marker::none;
+}
+
+void WaveformView::mouseDoubleClick (const juce::MouseEvent&)
+{
+    // Dois cliques: volta a usar o som inteiro.
+    if (! hasSound())
+        return;
+
+    startParam->setValueNotifyingHost (0.0f);
+    endParam->setValueNotifyingHost (1.0f);
+}
+
 void WaveformView::paint (juce::Graphics& g)
 {
-    auto area = getLocalBounds().toFloat();
+    const auto bounds = getLocalBounds().toFloat();
 
     g.setColour (panelColour);
-    g.fillRoundedRectangle (area, 6.0f);
+    g.fillRoundedRectangle (bounds, 6.0f);
 
-    if (thumbnail.getTotalLength() > 0.0)
+    if (hasSound())
     {
+        const auto area = waveArea();
+        const float xs = xFor (startParam->getValue());
+        const float xe = xFor (endParam->getValue());
+        const bool looping = loopValue->load() > 0.5f;
+
+        if (looping)
+        {
+            g.setColour (accentColour.withAlpha (0.08f));
+            g.fillRect (juce::Rectangle<float> (xs, area.getY(), xe - xs, area.getHeight()));
+        }
+
         g.setColour (accentColour);
-        thumbnail.drawChannels (g, getLocalBounds().reduced (8, 6), 0.0, thumbnail.getTotalLength(), 1.0f);
+        thumbnail.drawChannels (g, area.toNearestInt(), 0.0, thumbnail.getTotalLength(), 1.0f);
+
+        // Escurece o que fica de fora.
+        g.setColour (bgColour.withAlpha (0.72f));
+        g.fillRect (juce::Rectangle<float> (area.getX(), area.getY(), xs - area.getX(), area.getHeight()));
+        g.fillRect (juce::Rectangle<float> (xe, area.getY(), area.getRight() - xe, area.getHeight()));
+
+        auto drawMarker = [&] (float x, bool isStart, const juce::String& text)
+        {
+            g.setColour (textColour);
+            g.fillRect (juce::Rectangle<float> (x - 0.75f, area.getY(), 1.5f, area.getHeight()));
+
+            const float w = 44.0f, h = 16.0f;
+            const juce::Rectangle<float> tab (isStart ? x : x - w, area.getY(), w, h);
+            g.fillRoundedRectangle (tab, 3.0f);
+            g.setColour (bgColour);
+            g.setFont (12.0f);
+            g.drawText (text, tab, juce::Justification::centred);
+        };
+
+        drawMarker (xs, true,  utf8 ("in\xc3\xad" "cio"));
+        drawMarker (xe, false, looping ? juce::String ("loop") : juce::String ("fim"));
     }
     else
     {
@@ -60,7 +192,7 @@ void WaveformView::paint (juce::Graphics& g)
     }
 
     g.setColour (highlight ? accentColour : panelColour.brighter (0.25f));
-    g.drawRoundedRectangle (area.reduced (0.75f), 6.0f, highlight ? 2.0f : 1.0f);
+    g.drawRoundedRectangle (bounds.reduced (0.75f), 6.0f, highlight ? 2.0f : 1.0f);
 }
 
 //==============================================================================
@@ -94,7 +226,7 @@ void Knob::resized()
 DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     : AudioProcessorEditor (p),
       processor (p),
-      waveform (p.formatManager),
+      waveform (p.formatManager, p.apvts),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     title.setText ("DrikSampler", juce::dontSendNotification);
@@ -120,6 +252,13 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     openButton.onClick = [this] { openFile(); };
     addAndMakeVisible (openButton);
 
+    loopButton.setButtonText ("Loop");
+    loopButton.setColour (juce::ToggleButton::textColourId, textColour);
+    loopButton.setColour (juce::ToggleButton::tickColourId, accentColour);
+    loopButton.setColour (juce::ToggleButton::tickDisabledColourId, dimColour);
+    loopAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.apvts, "loop", loopButton);
+    addAndMakeVisible (loopButton);
+
     addAndMakeVisible (waveform);
 
     struct Def { const char* id; const char* title; };
@@ -132,6 +271,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
         { "release",   "Release" },
         { "cutoff",    "Filtro" },
         { "resonance", "Resson\xc3\xa2" "ncia" },
+        { "xfade",     "Emenda" },
         { "velsens",   "Sensibilidade" },
         { "gain",      "Volume" } };
 
@@ -151,7 +291,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     processor.addChangeListener (this);
     refreshFromProcessor();
 
-    setSize (900, 540);
+    setSize (980, 560);
 }
 
 DrikSamplerEditor::~DrikSamplerEditor()
@@ -173,10 +313,13 @@ void DrikSamplerEditor::resized()
     versionLabel.setBounds (top.removeFromLeft (190).withTrimmedTop (5));
     openButton.setBounds (top.removeFromRight (90).reduced (0, 3));
     top.removeFromRight (10);
+    loopButton.setBounds (top.removeFromRight (74));
+    top.removeFromRight (10);
     fileLabel.setBounds (top);
 
     area.removeFromTop (10);
     keyboard.setBounds (area.removeFromBottom (84));
+    keyboard.setKeyWidth ((float) keyboard.getWidth() / 64.0f);   // 64 teclas brancas de C0 a C9: ocupa a largura toda
     area.removeFromBottom (12);
 
     auto knobRow = area.removeFromBottom (108);

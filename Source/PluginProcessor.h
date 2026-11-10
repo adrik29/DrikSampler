@@ -28,6 +28,10 @@ struct VoiceParams
     std::atomic<float>* cutoff = nullptr;
     std::atomic<float>* resonance = nullptr;
     std::atomic<float>* velSens = nullptr;
+    std::atomic<float>* start = nullptr;      // 0..1 do comprimento do som
+    std::atomic<float>* end = nullptr;        // 0..1
+    std::atomic<float>* loop = nullptr;       // 0 ou 1
+    std::atomic<float>* xfadeMs = nullptr;    // emenda do loop
 };
 
 //==============================================================================
@@ -88,9 +92,10 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    /** Carrega um arquivo de audio. Com detectRoot, descobre a nota original
-        pelo nome do arquivo ou, se nao houver, pela analise do som. */
-    bool loadFile (const juce::File&, bool detectRoot);
+    /** Carrega um arquivo de audio. Com fresh = true (som novo, escolhido pelo usuario)
+        tambem corta o silencio das pontas e descobre a nota original; com false
+        (projeto reaberto) respeita os valores salvos. */
+    bool loadFile (const juce::File&, bool fresh);
     juce::File getCurrentFile() const;
 
     juce::AudioProcessorValueTreeState apvts;

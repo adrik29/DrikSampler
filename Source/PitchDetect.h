@@ -9,37 +9,27 @@
 namespace drik
 {
 
-/** Estima a frequencia fundamental (Hz) de um trecho mono pelo metodo YIN.
-    Devolve 0 se o som nao tiver altura definida (ruido, percussao). */
-inline double detectPitchHz (const float* x, int n, double sampleRate)
+/** YIN sobre uma janela que comeca em s (com avail amostras disponiveis).
+    fallbackMax > 0 aceita, na falta de um vale claro, o minimo global ate esse valor;
+    fallbackMax = 0 exige um vale claro (modo rigoroso). Devolve Hz, ou 0 se nao houver altura. */
+inline double yinWindow (const float* s, int avail, double sampleRate, double fallbackMax)
 {
-    if (x == nullptr || n < 2048 || sampleRate <= 0.0)
+    if (s == nullptr || sampleRate <= 0.0)
         return 0.0;
 
     const double minHz = 30.0, maxHz = 2000.0;
     const int tauMax = (int) (sampleRate / minHz);
     const int tauMin = std::max (2, (int) (sampleRate / maxHz));
 
-    // Pula o ataque: comeca um pouco depois do pico de amplitude.
-    int peak = 0;
-    float peakVal = 0.0f;
-    for (int i = 0; i < n; ++i)
-    {
-        const float a = std::fabs (x[i]);
-        if (a > peakVal) { peakVal = a; peak = i; }
-    }
-    if (peakVal < 1.0e-4f)
-        return 0.0;
-
-    const int window = std::min (4096, n - tauMax - 1);
+    const int window = std::min (4096, avail - tauMax - 1);
     if (window < 512)
         return 0.0;
 
-    int start = peak + (int) (0.05 * sampleRate);
-    if (start + window + tauMax >= n)
-        start = std::max (0, (n - window - tauMax - 1) / 2);
-
-    const float* s = x + start;
+    double energy = 0.0;
+    for (int j = 0; j < window; ++j)
+        energy += (double) s[j] * (double) s[j];
+    if (energy / window < 1.0e-9)
+        return 0.0;                       // janela praticamente em silencio
 
     std::vector<double> d ((size_t) tauMax + 1, 0.0);
     for (int tau = 1; tau <= tauMax; ++tau)
@@ -77,12 +67,14 @@ inline double detectPitchHz (const float* x, int n, double sampleRate)
 
     if (best < 0)
     {
-        // Nada passou do limiar: aceita o minimo global so se for razoavel.
+        if (fallbackMax <= 0.0)
+            return 0.0;
+
         int argmin = tauMin;
         for (int tau = tauMin; tau < tauMax; ++tau)
             if (cmnd[(size_t) tau] < cmnd[(size_t) argmin])
                 argmin = tau;
-        if (cmnd[(size_t) argmin] > 0.35)
+        if (cmnd[(size_t) argmin] > fallbackMax)
             return 0.0;
         best = argmin;
     }
@@ -100,12 +92,74 @@ inline double detectPitchHz (const float* x, int n, double sampleRate)
     return tauRefined > 0.0 ? sampleRate / tauRefined : 0.0;
 }
 
+/** Estima a frequencia fundamental (Hz) de um som mono, olhando logo depois do ataque.
+    Devolve 0 se o som nao tiver altura definida (ruido, percussao). */
+inline double detectPitchHz (const float* x, int n, double sampleRate)
+{
+    if (x == nullptr || n < 2048 || sampleRate <= 0.0)
+        return 0.0;
+
+    int peak = 0;
+    float peakVal = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const float a = std::fabs (x[i]);
+        if (a > peakVal) { peakVal = a; peak = i; }
+    }
+    if (peakVal < 1.0e-4f)
+        return 0.0;
+
+    const int tauMax = (int) (sampleRate / 30.0);
+    const int window = std::min (4096, n - tauMax - 1);
+    if (window < 512)
+        return 0.0;
+
+    int start = peak + (int) (0.05 * sampleRate);
+    if (start + window + tauMax >= n)
+        start = std::max (0, (n - window - tauMax - 1) / 2);
+
+    return yinWindow (x + start, n - start, sampleRate, 0.35);
+}
+
 inline int hzToMidiNote (double hz)
 {
     if (hz <= 0.0)
         return -1;
     const int note = (int) std::lround (69.0 + 12.0 * std::log2 (hz / 440.0));
     return (note >= 0 && note <= 127) ? note : -1;
+}
+
+/** Nota original de um som, ou -1 se nao der para confiar.
+    Som curto (menos de 3 s): um palpite so, logo depois do ataque.
+    Som comprido: a nota tem que ser a mesma em varios pontos; trecho de musica,
+    onde a altura muda o tempo todo, devolve -1. */
+inline int detectNote (const float* x, int n, double sampleRate)
+{
+    if (x == nullptr || n < 2048 || sampleRate <= 0.0)
+        return -1;
+
+    const int first = hzToMidiNote (detectPitchHz (x, n, sampleRate));
+
+    if ((double) n < 3.0 * sampleRate)
+        return first;
+
+    int valid = 0, lo = 128, hi = -1;
+    for (double f : { 0.15, 0.30, 0.45, 0.60, 0.75 })
+    {
+        const int start = (int) (f * n);
+        const int note = hzToMidiNote (yinWindow (x + start, n - start, sampleRate, 0.0));
+        if (note >= 0)
+        {
+            ++valid;
+            lo = std::min (lo, note);
+            hi = std::max (hi, note);
+        }
+    }
+
+    if (valid < 4 || hi - lo > 1)
+        return -1;
+
+    return (first >= lo && first <= hi) ? first : lo;
 }
 
 /** Procura um nome de nota no nome do arquivo ("Rhodes_F#2.wav", "strings Bb3").
@@ -168,6 +222,27 @@ inline int noteFromFilename (const std::string& name)
     }
 
     return found;
+}
+
+/** Acha onde o som realmente comeca e termina (acima de -60 dB em relacao ao pico).
+    Devolve false se o arquivo for todo silencio. */
+inline bool findSoundBounds (const float* x, int n, double sampleRate, int& first, int& last)
+{
+    float peak = 0.0f;
+    for (int i = 0; i < n; ++i)
+        peak = std::max (peak, std::fabs (x[i]));
+    if (peak < 1.0e-5f)
+        return false;
+
+    const float threshold = peak * 0.001f;
+    int a = 0, b = n - 1;
+    while (a < n && std::fabs (x[a]) < threshold) ++a;
+    while (b > a && std::fabs (x[b]) < threshold) --b;
+
+    // Folga pequena para nao comer o ataque nem o finzinho da cauda.
+    first = std::max (0, a - (int) (0.002 * sampleRate));
+    last  = std::min (n, b + 1 + (int) (0.010 * sampleRate));
+    return last - first > 16;
 }
 
 } // namespace drik
