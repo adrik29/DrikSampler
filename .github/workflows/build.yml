@@ -1,0 +1,47 @@
+name: Compilar DrikSampler (Windows)
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar
+        run: cmake -B build -A x64
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+
+      - name: Empacotar
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pacote | Out-Null
+          Copy-Item -Recurse build/DrikSampler_artefacts/Release/VST3/DrikSampler.vst3 pacote/
+          Copy-Item build/DrikSampler_artefacts/Release/Standalone/DrikSampler.exe pacote/
+          Copy-Item LEIA-ME-instalacao.txt pacote/
+          Compress-Archive -Path pacote/* -DestinationPath DrikSampler-Windows.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DrikSampler-Windows
+          path: DrikSampler-Windows.zip
+
+      - name: Publicar em Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ultima-compilacao --cleanup-tag --yes 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create ultima-compilacao DrikSampler-Windows.zip `
+            --target $env:GITHUB_SHA `
+            --title "DrikSampler - ultima compilacao" `
+            --notes "Gerado automaticamente a partir de $env:GITHUB_SHA. Instrucoes no LEIA-ME dentro do zip." `
+            --prerelease

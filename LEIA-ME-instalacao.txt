@@ -1,0 +1,16 @@
+DrikSampler - instalacao no Windows
+
+1. Copie a pasta "DrikSampler.vst3" inteira para:
+       C:\Program Files\Common Files\VST3
+   (o Windows vai pedir permissao de administrador; aceite)
+
+2. Abra o Reaper. Se o plugin nao aparecer na lista:
+       Options > Preferences > Plug-ins > VST > Re-scan
+
+3. Numa trilha, clique em FX e procure "DrikSampler" (aparece como VST3i).
+
+4. Arraste um arquivo de audio (WAV, AIFF, FLAC, MP3) para a janela do plugin,
+   ou use o botao "Abrir...". Toque no teclado da tela ou no teclado MIDI.
+
+O "DrikSampler.exe" e o mesmo instrumento rodando sozinho, sem o Reaper.
+Serve para testar rapido; nao precisa instalar.
