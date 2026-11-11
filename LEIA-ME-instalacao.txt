@@ -9,8 +9,14 @@ DrikSampler - instalacao no Windows
 
 3. Numa trilha, clique em FX e procure "DrikSampler" (aparece como VST3i).
 
-4. Arraste um arquivo de audio (WAV, AIFF, FLAC, MP3) para a janela do plugin,
-   ou use o botao "Abrir...". Toque no teclado da tela ou no teclado MIDI.
+4. Arraste para a janela do plugin um arquivo de audio (WAV, AIFF, FLAC, MP3),
+   varios arquivos de uma vez, ou um instrumento no formato SFZ (o arquivo .sfz
+   ou a pasta inteira da biblioteca). O botao "Abrir..." faz o mesmo.
+   Toque no teclado da tela, no teclado MIDI ou no teclado do computador.
+
+   Bibliotecas SFZ: descompacte numa pasta definitiva e nao mexa nos arquivos de
+   dentro. O projeto do Reaper guarda o caminho; se a pasta mudar de lugar, o
+   projeto abre sem som.
 
 O "DrikSampler.exe" e o mesmo instrumento rodando sozinho, sem o Reaper.
 Serve para testar rapido; nao precisa instalar.

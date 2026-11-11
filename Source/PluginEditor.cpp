@@ -187,7 +187,7 @@ void WaveformView::paint (juce::Graphics& g)
     {
         g.setColour (dimColour);
         g.setFont (17.0f);
-        g.drawFittedText (utf8 ("Arraste um arquivo de \xc3\xa1" "udio para c\xc3\xa1"),
+        g.drawFittedText (utf8 ("Arraste para c\xc3\xa1 um som, v\xc3\xa1rios sons, uma pasta ou um instrumento .sfz"),
                           getLocalBounds(), juce::Justification::centred, 1);
     }
 
@@ -196,8 +196,87 @@ void WaveformView::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+void MapView::paint (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds().toFloat();
+    g.setColour (panelColour);
+    g.fillRoundedRectangle (bounds, 6.0f);
+
+    // Faixas unicas de teclas (camadas de forca e rodizio caem na mesma faixa).
+    std::vector<InstrumentInfo::Zone> ranges;
+    int lowest = 127, highest = 0;
+    for (const auto& z : info.zones)
+    {
+        lowest = juce::jmin (lowest, z.lo);
+        highest = juce::jmax (highest, z.hi);
+        bool known = false;
+        for (const auto& r : ranges) known = known || (r.lo == z.lo && r.hi == z.hi);
+        if (! known) ranges.push_back (z);
+    }
+    std::sort (ranges.begin(), ranges.end(), [] (const auto& a, const auto& b) { return a.lo < b.lo; });
+
+    auto name = [] (int n) { return juce::MidiMessage::getMidiNoteName (n, true, true, 4); };
+
+    g.setColour (textColour);
+    g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+    g.drawText (info.name, getLocalBounds().reduced (16, 12).removeFromTop (26), juce::Justification::centredLeft);
+
+    juce::String summary;
+    if (! info.zones.empty())
+        summary << (int) info.zones.size() << " samples   |   teclas " << name (lowest) << " a " << name (highest);
+    if (info.zones.size() != ranges.size())
+        summary << "   |   " << (int) ranges.size() << " faixas";
+    g.setColour (dimColour);
+    g.setFont (14.0f);
+    g.drawText (summary, getLocalBounds().reduced (16, 12).withTrimmedTop (30).removeFromTop (20), juce::Justification::centredLeft);
+
+    if (info.message.isNotEmpty())
+    {
+        g.setColour (accentColour);
+        g.drawText (info.message, getLocalBounds().reduced (16, 12).withTrimmedTop (52).removeFromTop (20), juce::Justification::centredLeft);
+    }
+
+    if (keyRectangle != nullptr && ! ranges.empty())
+    {
+        const float top = bounds.getBottom() - 74.0f, height = 46.0f;
+        const float offsetX = 0.0f;
+
+        g.setColour (dimColour);
+        g.setFont (12.5f);
+        g.drawText (utf8 ("cada bloco \xc3\xa9 um sample; o tra\xc3\xa7o claro marca a nota em que ele foi gravado"),
+                    juce::Rectangle<float> (16.0f, top - 22.0f, bounds.getWidth() - 32.0f, 18.0f), juce::Justification::centredLeft);
+
+        for (size_t i = 0; i < ranges.size(); ++i)
+        {
+            const auto a = keyRectangle (ranges[i].lo), b = keyRectangle (ranges[i].hi);
+            const float x1 = juce::jmin (a.getX(), b.getX()) + offsetX;
+            const float x2 = juce::jmax (a.getRight(), b.getRight()) + offsetX;
+            if (x2 <= x1) continue;
+
+            g.setColour (i % 2 == 0 ? accentColour : accentColour.darker (0.45f));
+            g.fillRoundedRectangle (juce::Rectangle<float> (x1 + 1.0f, top, juce::jmax (2.0f, x2 - x1 - 2.0f), height), 2.0f);
+
+            const auto r = keyRectangle (ranges[i].root);
+            if (ranges[i].root >= ranges[i].lo && ranges[i].root <= ranges[i].hi && x2 - x1 > 14.0f)
+            {
+                g.setColour (textColour);
+                g.fillRect (juce::Rectangle<float> (r.getCentreX() - 1.0f, top + height - 12.0f, 2.0f, 12.0f));
+            }
+        }
+
+        g.setColour (dimColour);
+        g.setFont (12.0f);
+        g.drawText (utf8 ("fora dos blocos n\xc3\xa3" "o h\xc3\xa1 som"), juce::Rectangle<float> (16.0f, top + height + 4.0f, 300.0f, 16.0f),
+                    juce::Justification::centredLeft);
+    }
+
+    g.setColour (highlight ? accentColour : panelColour.brighter (0.25f));
+    g.drawRoundedRectangle (bounds.reduced (0.75f), 6.0f, highlight ? 2.0f : 1.0f);
+}
+
+//==============================================================================
 Knob::Knob (juce::AudioProcessorValueTreeState& state, const juce::String& paramID, const juce::String& titleText)
-    : attachment (state, paramID, slider)
+    : id (paramID), attachment (state, paramID, slider)
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 18);
@@ -227,7 +306,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     : AudioProcessorEditor (p),
       processor (p),
       waveform (p.formatManager, p.apvts),
-      keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
+      keyboard (p.keyboardState)
 {
     title.setText ("DrikSampler", juce::dontSendNotification);
     title.setFont (juce::FontOptions (22.0f, juce::Font::bold));
@@ -260,6 +339,29 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     addAndMakeVisible (loopButton);
 
     addAndMakeVisible (waveform);
+    addChildComponent (mapView);
+    mapView.keyRectangle = [this] (int note) { return keyboard.getRectangleForKey (note); };
+
+    // Sons dentro de um SFZ que traz varios (escolhidos por keyswitch no arquivo).
+    programBox.setColour (juce::ComboBox::backgroundColourId, panelColour);
+    programBox.setColour (juce::ComboBox::textColourId, textColour);
+    programBox.setColour (juce::ComboBox::outlineColourId, accentColour.withAlpha (0.6f));
+    programBox.setColour (juce::ComboBox::arrowColourId, accentColour);
+    programBox.onChange = [this]
+    {
+        if (refreshing) return;
+        const auto i = processor.getInfo();
+        const int chosen = programBox.getSelectedId() - 1;
+        if (i.mode == InstrumentInfo::sfz && chosen >= 0 && chosen != i.program)
+            processor.loadSfz (i.file, chosen, false);
+    };
+    addChildComponent (programBox);
+
+    octaveLabel.setFont (juce::FontOptions (13.0f));
+    octaveLabel.setColour (juce::Label::textColourId, dimColour);
+    addAndMakeVisible (octaveLabel);
+    keyboard.onOctaveChange = [this] { showOctave(); };
+    showOctave();
 
     struct Def { const char* id; const char* title; };
     const Def defs[] = {
@@ -291,7 +393,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     processor.addChangeListener (this);
     refreshFromProcessor();
 
-    setSize (980, 560);
+    setSize (980, 580);
 }
 
 DrikSamplerEditor::~DrikSamplerEditor()
@@ -310,7 +412,7 @@ void DrikSamplerEditor::resized()
 
     auto top = area.removeFromTop (34);
     title.setBounds (top.removeFromLeft (140));
-    versionLabel.setBounds (top.removeFromLeft (190).withTrimmedTop (5));
+    versionLabel.setBounds (top.removeFromLeft (150).withTrimmedTop (5));
     openButton.setBounds (top.removeFromRight (90).reduced (0, 3));
     top.removeFromRight (10);
     loopButton.setBounds (top.removeFromRight (74));
@@ -318,6 +420,7 @@ void DrikSamplerEditor::resized()
     fileLabel.setBounds (top);
 
     area.removeFromTop (10);
+    octaveLabel.setBounds (area.removeFromBottom (18));
     keyboard.setBounds (area.removeFromBottom (84));
     keyboard.setKeyWidth ((float) keyboard.getWidth() / 64.0f);   // 64 teclas brancas de C0 a C9: ocupa a largura toda
     area.removeFromBottom (12);
@@ -325,6 +428,8 @@ void DrikSamplerEditor::resized()
     auto knobRow = area.removeFromBottom (108);
     area.removeFromBottom (12);
     waveform.setBounds (area);
+    mapView.setBounds (area);
+    programBox.setBounds (area.getRight() - 296, area.getY() + 12, 280, 26);
 
     const int w = knobRow.getWidth() / juce::jmax (1, knobs.size());
     for (auto* k : knobs)
@@ -332,42 +437,84 @@ void DrikSamplerEditor::resized()
 }
 
 //==============================================================================
-void DrikSamplerEditor::refreshFromProcessor()
+void DrikSamplerEditor::showOctave()
 {
-    const auto file = processor.getCurrentFile();
-    waveform.setFile (file);
-    fileLabel.setText (file.existsAsFile() ? file.getFileName() : utf8 ("nenhum som carregado"),
-                       juce::dontSendNotification);
+    octaveLabel.setText (utf8 ("Teclado do computador: clique no teclado acima; A S D F G H J K tocam, com A = D\xc3\xb3 ") + "C"
+                         + juce::String (keyboard.getOctave() - 1) + utf8 ("; Z e X mudam a oitava"), juce::dontSendNotification);
 }
 
-void DrikSamplerEditor::tryLoad (const juce::File& file)
+void DrikSamplerEditor::refreshFromProcessor()
 {
-    if (! processor.loadFile (file, true))
-        fileLabel.setText (utf8 ("N\xc3\xa3" "o consegui abrir: ") + file.getFileName(), juce::dontSendNotification);
+    const auto i = processor.getInfo();
+    const bool multi = i.mode == InstrumentInfo::sfz || i.mode == InstrumentInfo::files;
+
+    waveform.setVisible (! multi);
+    mapView.setVisible (multi);
+    loopButton.setVisible (! multi);
+
+    if (multi)
+        mapView.setInfo (i);
+    else
+        waveform.setFile (i.file);
+
+    // Num multisample, nota original e loop vem de cada sample: esses botoes deixam de valer.
+    for (auto* k : knobs)
+        if (k->id == "root" || k->id == "xfade")
+        {
+            k->setEnabled (! multi);
+            k->setAlpha (multi ? 0.35f : 1.0f);
+        }
+
+    refreshing = true;
+    programBox.clear (juce::dontSendNotification);
+    for (int p = 0; p < i.programs.size(); ++p)
+        programBox.addItem (i.programs[p], p + 1);
+    programBox.setSelectedId (i.program + 1, juce::dontSendNotification);
+    programBox.setVisible (multi && i.programs.size() > 1);
+    refreshing = false;
+
+    juce::String text = i.mode == InstrumentInfo::empty ? utf8 ("nenhum som carregado") : i.name;
+    if (! multi && i.message.isNotEmpty())
+        text = i.message;
+    fileLabel.setText (text, juce::dontSendNotification);
+}
+
+void DrikSamplerEditor::tryLoad (const juce::Array<juce::File>& files)
+{
+    setMouseCursor (juce::MouseCursor::WaitCursor);
+    const bool ok = processor.loadAnything (files);
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+
+    if (! ok && processor.getInfo().message.isEmpty() && ! files.isEmpty())
+        fileLabel.setText (utf8 ("N\xc3\xa3" "o consegui abrir: ") + files.getFirst().getFileName(), juce::dontSendNotification);
 }
 
 void DrikSamplerEditor::filesDropped (const juce::StringArray& files, int, int)
 {
     waveform.setDragHighlight (false);
+    mapView.setDragHighlight (false);
 
-    if (! files.isEmpty())
-        tryLoad (juce::File (files[0]));
+    juce::Array<juce::File> list;
+    for (const auto& f : files)
+        list.add (juce::File (f));
+    tryLoad (list);
 }
 
 void DrikSamplerEditor::openFile()
 {
     auto start = processor.getCurrentFile();
-    if (! start.existsAsFile())
+    if (! start.exists())
         start = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
 
-    chooser = std::make_unique<juce::FileChooser> ("Escolha um som", start,
-                                                   processor.formatManager.getWildcardForAllFormats());
+    chooser = std::make_unique<juce::FileChooser> (utf8 ("Escolha um som, v\xc3\xa1rios sons ou um instrumento SFZ"), start,
+                                                   "*.sfz;" + processor.formatManager.getWildcardForAllFormats());
 
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::canSelectMultipleItems,
                           [this] (const juce::FileChooser& fc)
                           {
-                              const auto f = fc.getResult();
-                              if (f.existsAsFile())
-                                  tryLoad (f);
+                              const auto chosen = fc.getResults();
+                              if (! chosen.isEmpty())
+                                  tryLoad (chosen);
                           });
 }

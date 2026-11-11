@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "PitchDetect.h"
+#include "SfzParser.h"
+#include <map>
 
 //==============================================================================
 void DrikVoice::setCurrentPlaybackSampleRate (double newRate)
@@ -32,15 +34,24 @@ void DrikVoice::startNote (int midiNote, float velocity, juce::SynthesiserSound*
     }
 
     note = midiNote;
-    const double semis = (double) midiNote - (double) params.root->load() + (double) params.tune->load();
+    released = false;
+
+    // Um sample so: a nota original vem do botao. Multisample: vem da zona.
+    double semis = (double) midiNote + (double) params.tune->load();
+    if (sound->single)
+        semis -= (double) params.root->load();
+    else
+        semis += -(double) sound->root + (sound->tuneCents + random.nextDouble() * sound->pitchRandomCents) / 100.0;
+
     baseRatio = std::pow (2.0, semis / 12.0) * sound->sourceRate / sr;
     bendSemis = ((double) pitchWheel - 8192.0) / 8192.0 * 2.0;
     updateRatio();
 
-    position = (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) sound->length;
+    position = sound->single ? (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) sound->length
+                             : (double) sound->offset;
     // Sensibilidade: 100% = a forca da tecla manda no volume; 0% = toda nota sai no volume cheio.
     const float sens = juce::jlimit (0.0f, 1.0f, params.velSens->load());
-    velocityGain = 1.0f - sens + sens * velocity;
+    velocityGain = (1.0f - sens + sens * velocity) * sound->gain;
 
     adsr.setParameters ({ params.attack->load(), params.decay->load(), params.sustain->load(), params.release->load() });
     adsr.reset();
@@ -50,9 +61,14 @@ void DrikVoice::startNote (int midiNote, float velocity, juce::SynthesiserSound*
 
 void DrikVoice::stopNote (float, bool allowTailOff)
 {
+    released = true;
+
     if (allowTailOff)
     {
-        adsr.noteOff();
+        // Zona marcada para tocar ate o fim (one_shot) ignora a soltura da tecla.
+        auto* sound = dynamic_cast<DrikSound*> (getCurrentlyPlayingSound().get());
+        if (sound == nullptr || sound->single || sound->loopMode != 3)
+            adsr.noteOff();
     }
     else
     {
@@ -74,9 +90,9 @@ void DrikVoice::renderNextBlock (juce::AudioBuffer<float>& out, int startSample,
         return;
 
     const int length = sound->length;
-    const int numCh = sound->data.getNumChannels();
-    const float* inL = sound->data.getReadPointer (0);
-    const float* inR = numCh > 1 ? sound->data.getReadPointer (1) : inL;
+    const int numCh = sound->data->getNumChannels();
+    const float* inL = sound->data->getReadPointer (0);
+    const float* inR = numCh > 1 ? sound->data->getReadPointer (1) : inL;
 
     float* outL = out.getWritePointer (0, startSample);
     float* outR = out.getNumChannels() > 1 ? out.getWritePointer (1, startSample) : nullptr;
@@ -88,16 +104,29 @@ void DrikVoice::renderNextBlock (juce::AudioBuffer<float>& out, int startSample,
     filter.setCutoffFrequency (juce::jlimit (20.0f, maxCutoff, params.cutoff->load()));
     filter.setResonance (juce::jlimit (0.3f, 12.0f, params.resonance->load()));
 
-    // Trecho tocado: entre os marcadores de inicio e fim (lidos a cada bloco, entao
-    // arrastar um marcador com a nota soando ja vale na hora).
-    const double startS = (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) length;
-    const double endS   = juce::jlimit (startS + 2.0, (double) length, (double) params.end->load() * (double) length);
-    const bool looping  = params.loop->load() > 0.5f && endS - startS > 8.0;
+    double startS, endS, xfade = 0.0;
+    bool looping;
 
-    // Emenda do loop: nos ultimos X samples antes do fim, o som vai dando lugar ao comeco.
-    const double xfade = looping ? juce::jlimit (0.0, (endS - startS) * 0.5,
-                                                 (double) params.xfadeMs->load() * 0.001 * sound->sourceRate)
-                                 : 0.0;
+    if (sound->single)
+    {
+        // Trecho tocado: entre os marcadores de inicio e fim (lidos a cada bloco, entao
+        // arrastar um marcador com a nota soando ja vale na hora).
+        startS  = (double) juce::jlimit (0.0f, 1.0f, params.start->load()) * (double) length;
+        endS    = juce::jlimit (startS + 2.0, (double) length, (double) params.end->load() * (double) length);
+        looping = params.loop->load() > 0.5f && endS - startS > 8.0;
+
+        // Emenda do loop: nos ultimos X samples antes do fim, o som vai dando lugar ao comeco.
+        if (looping)
+            xfade = juce::jlimit (0.0, (endS - startS) * 0.5, (double) params.xfadeMs->load() * 0.001 * sound->sourceRate);
+    }
+    else
+    {
+        // Multisample: o trecho e o loop vem da zona; os pontos de loop do autor sao respeitados como estao.
+        looping = (sound->loopMode == 1 || (sound->loopMode == 2 && ! released)) && sound->loopEnd - sound->loopStart > 8;
+        startS  = looping ? (double) sound->loopStart : (double) sound->offset;
+        endS    = looping ? (double) sound->loopEnd : (double) sound->end;
+    }
+
     const double fadeOut = 64.0;   // sem loop: desce rapido no fim para nao estalar
 
     auto read = [inL, inR] (double pos, float& l, float& r)
@@ -170,6 +199,44 @@ void DrikVoice::renderNextBlock (juce::AudioBuffer<float>& out, int startSample,
     }
 
     filter.snapToZero();
+}
+
+//==============================================================================
+void SamplerEngine::noteOn (int channel, int midiNote, float velocity)
+{
+    const juce::ScopedLock sl (lock);
+
+    const int vel = juce::jlimit (1, 127, juce::roundToInt (velocity * 127.0f));
+    const float dice = random.nextFloat();
+    bool stoppedOld = false;
+
+    for (auto* s : sounds)
+    {
+        auto* zone = static_cast<DrikSound*> (s);
+
+        if (! zone->appliesToNote (midiNote) || ! zone->appliesToChannel (channel))
+            continue;
+
+        if (! zone->single)
+        {
+            if (vel < zone->loVel || vel > zone->hiVel)                         continue;   // camada de forca
+            if (dice < zone->loRand || dice >= zone->hiRand)                    continue;   // variacao aleatoria
+            if (zone->seqLength > 1 && sequence % zone->seqLength != zone->seqPosition - 1) continue;   // rodizio
+        }
+
+        // Se a mesma nota ainda esta soando, solta a anterior primeiro (uma vez so).
+        if (! stoppedOld)
+        {
+            stoppedOld = true;
+            for (auto* voice : voices)
+                if (voice->getCurrentlyPlayingNote() == midiNote && voice->isPlayingChannel (channel))
+                    stopVoice (voice, 1.0f, true);
+        }
+
+        startVoice (findFreeVoice (zone, channel, midiNote, isNoteStealingEnabled()), zone, channel, midiNote, velocity);
+    }
+
+    ++sequence;
 }
 
 //==============================================================================
@@ -283,6 +350,34 @@ void DrikSamplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 }
 
 //==============================================================================
+void DrikSamplerProcessor::setParam (const char* id, float value)
+{
+    if (auto* p = apvts.getParameter (id))
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+void DrikSamplerProcessor::setInfo (const InstrumentInfo& newInfo)
+{
+    {
+        const juce::ScopedLock sl (fileLock);
+        info = newInfo;
+    }
+    sendChangeMessage();
+}
+
+InstrumentInfo DrikSamplerProcessor::getInfo() const
+{
+    const juce::ScopedLock sl (fileLock);
+    return info;
+}
+
+juce::File DrikSamplerProcessor::getCurrentFile() const
+{
+    const juce::ScopedLock sl (fileLock);
+    return info.file;
+}
+
+//==============================================================================
 bool DrikSamplerProcessor::loadFile (const juce::File& file, bool fresh)
 {
     if (! file.existsAsFile())
@@ -300,26 +395,22 @@ bool DrikSamplerProcessor::loadFile (const juce::File& file, bool fresh)
     auto* sound = new DrikSound();
     juce::SynthesiserSound::Ptr holder (sound);
 
-    sound->data.setSize (numCh, length + 4);
-    sound->data.clear();
-    reader->read (&sound->data, 0, length, 0, true, numCh > 1);
+    sound->data = std::make_shared<juce::AudioBuffer<float>> (numCh, length + 4);
+    sound->data->clear();
+    reader->read (sound->data.get(), 0, length, 0, true, numCh > 1);
     sound->length = length;
+    sound->end = length;
     sound->sourceRate = reader->sampleRate;
+    sound->single = true;
 
     if (fresh)
     {
-        auto setParam = [this] (const char* id, float value)
-        {
-            if (auto* p = apvts.getParameter (id))
-                p->setValueNotifyingHost (p->convertTo0to1 (value));
-        };
-
         std::vector<float> mono ((size_t) length);
         for (int i = 0; i < length; ++i)
         {
-            float v = sound->data.getSample (0, i);
+            float v = sound->data->getSample (0, i);
             if (numCh > 1)
-                v = 0.5f * (v + sound->data.getSample (1, i));
+                v = 0.5f * (v + sound->data->getSample (1, i));
             mono[(size_t) i] = v;
         }
 
@@ -347,27 +438,355 @@ bool DrikSamplerProcessor::loadFile (const juce::File& file, bool fresh)
 
     synth.clearSounds();
     synth.addSound (holder);
+    fileZones.clear();
 
-    {
-        const juce::ScopedLock sl (fileLock);
-        currentFile = file;
-    }
-
-    sendChangeMessage();
+    InstrumentInfo i;
+    i.mode = InstrumentInfo::single;
+    i.file = file;
+    i.name = file.getFileName();
+    setInfo (i);
     return true;
 }
 
-juce::File DrikSamplerProcessor::getCurrentFile() const
+//==============================================================================
+int DrikSamplerProcessor::installZones (const std::vector<ZoneDesc>& zones, juce::String& problem, std::vector<InstrumentInfo::Zone>& installed)
 {
-    const juce::ScopedLock sl (fileLock);
-    return currentFile;
+    installed.clear();
+    std::vector<DrikSound*> withEnd;
+    std::map<juce::String, std::pair<std::shared_ptr<juce::AudioBuffer<float>>, double>> cache;
+    juce::Array<juce::SynthesiserSound::Ptr> loaded;
+    juce::int64 bytes = 0;
+    int missing = 0;
+    const juce::int64 budget = (juce::int64) 1500 * 1024 * 1024;       // teto de memoria: 1,5 GB
+
+    for (const auto& z : zones)
+    {
+        const auto key = z.file.getFullPathName();
+        auto it = cache.find (key);
+
+        if (it == cache.end())
+        {
+            std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (z.file));
+            if (reader == nullptr || reader->lengthInSamples < 2 || reader->sampleRate <= 0.0)
+            {
+                ++missing;
+                continue;
+            }
+
+            const int length = (int) juce::jmin (reader->lengthInSamples, (juce::int64) (reader->sampleRate * 600.0));
+            const int numCh = juce::jlimit (1, 2, (int) reader->numChannels);
+            bytes += (juce::int64) length * numCh * 4;
+            if (bytes > budget)
+            {
+                problem = juce::String::fromUTF8 ("instrumento grande demais para a mem\xc3\xb3ria; carreguei s\xc3\xb3 uma parte");
+                break;
+            }
+
+            auto buffer = std::make_shared<juce::AudioBuffer<float>> (numCh, length + 4);
+            buffer->clear();
+            reader->read (buffer.get(), 0, length, 0, true, numCh > 1);
+            it = cache.emplace (key, std::make_pair (buffer, reader->sampleRate)).first;
+        }
+
+        auto* sound = new DrikSound();
+        sound->data = it->second.first;
+        sound->sourceRate = it->second.second;
+        sound->length = sound->data->getNumSamples() - 4;
+        sound->single = false;
+        sound->loKey = z.loKey;   sound->hiKey = z.hiKey;
+        sound->loVel = z.loVel;   sound->hiVel = z.hiVel;
+        sound->root = z.root;
+        sound->tuneCents = z.tuneCents;
+        sound->pitchRandomCents = z.pitchRandomCents;
+        sound->gain = juce::Decibels::decibelsToGain ((float) z.volumeDb);
+        sound->offset = (int) juce::jlimit ((juce::int64) 0, (juce::int64) juce::jmax (0, sound->length - 2), z.offset);
+        sound->end = z.end > 0 ? (int) juce::jlimit ((juce::int64) sound->offset + 2, (juce::int64) sound->length, z.end + 1) : sound->length;
+        sound->loopMode = z.loopMode;
+        sound->loopStart = (int) juce::jlimit ((juce::int64) 0, (juce::int64) sound->length, z.loopStart);
+        sound->loopEnd = (int) juce::jlimit ((juce::int64) 0, (juce::int64) sound->length, z.loopEnd + 1);
+        if (sound->loopEnd - sound->loopStart <= 8 && (sound->loopMode == 1 || sound->loopMode == 2))
+            sound->loopMode = 0;
+        sound->seqLength = z.seqLength;   sound->seqPosition = z.seqPosition;
+        sound->loRand = z.loRand;         sound->hiRand = z.hiRand;
+        loaded.add (sound);
+        installed.push_back ({ z.loKey, z.hiKey, z.root });
+        if (z.end > 0)
+            withEnd.push_back (sound);
+    }
+
+    // Defeito conhecido de alguns SFZ: o 'end' de todas as regioes cai na metade exata do sample
+    // (conta feita como se o arquivo mono fosse estereo), e toda nota e cortada no meio.
+    // Quando o padrao e inequivoco, toca o sample inteiro e avisa.
+    if (withEnd.size() >= 4)
+    {
+        bool allHalf = true;
+        for (auto* snd : withEnd)
+        {
+            const double ratio = (double) snd->end / (double) juce::jmax (1, snd->length);
+            allHalf = allHalf && ratio > 0.47 && ratio < 0.53;
+        }
+        if (allHalf)
+        {
+            for (auto* snd : withEnd)
+                snd->end = snd->length;
+            if (problem.isEmpty())
+                problem = juce::String::fromUTF8 ("o arquivo cortava cada nota na metade; estou tocando os samples inteiros");
+        }
+    }
+
+    if (loaded.isEmpty())
+    {
+        if (problem.isEmpty())
+            problem = juce::String::fromUTF8 ("n\xc3\xa3o achei nenhum dos arquivos de \xc3\xa1udio");
+        return 0;
+    }
+
+    synth.allNotesOff (0, false);
+    synth.clearSounds();
+    for (auto& snd : loaded)
+        synth.addSound (snd);
+
+    if (missing > 0 && problem.isEmpty())
+        problem = juce::String (missing) + juce::String::fromUTF8 (missing == 1 ? " arquivo n\xc3\xa3o encontrado" : " arquivos n\xc3\xa3o encontrados");
+
+    return loaded.size();
+}
+
+bool DrikSamplerProcessor::loadSfz (const juce::File& file, int program, bool fresh)
+{
+    const auto parsed = drik::parseSfz (file.getFullPathName().toStdString());
+
+    InstrumentInfo i;
+    i.mode = InstrumentInfo::sfz;
+    i.file = file;
+    i.name = file.getFileNameWithoutExtension();
+
+    if (! parsed.error.empty())
+    {
+        // Nao troca o instrumento atual; so avisa.
+        auto current = getInfo();
+        current.message = file.getFileName() + ": " + juce::String::fromUTF8 (parsed.error.c_str());
+        setInfo (current);
+        return false;
+    }
+
+    for (const auto& p : parsed.programs)
+        i.programs.add (juce::String::fromUTF8 (p.second.c_str()));
+
+    int programValue = -1;
+    if (! parsed.programs.empty())
+    {
+        if (program < 0)
+        {
+            program = 0;
+            for (size_t k = 0; k < parsed.programs.size(); ++k)
+                if (parsed.programs[k].first == parsed.defaultProgram)
+                    program = (int) k;
+        }
+        program = juce::jlimit (0, (int) parsed.programs.size() - 1, program);
+        programValue = parsed.programs[(size_t) program].first;
+        i.program = program;
+    }
+
+    std::vector<ZoneDesc> zones;
+    for (const auto& r : parsed.regions)
+    {
+        if (r.program >= 0 && programValue >= 0 && r.program != programValue)
+            continue;                                   // pertence a outro som do mesmo arquivo
+
+        ZoneDesc z;
+        z.file = juce::File (juce::String::fromUTF8 (r.samplePath.c_str()));
+        z.loKey = r.loKey;  z.hiKey = r.hiKey;  z.loVel = r.loVel;  z.hiVel = r.hiVel;  z.root = r.root;
+        z.tuneCents = r.tuneCents;  z.pitchRandomCents = r.pitchRandomCents;  z.volumeDb = r.volumeDb;
+        z.offset = r.offset;  z.end = r.end;
+        z.loopMode = r.loopMode;  z.loopStart = r.loopStart;  z.loopEnd = r.loopEnd;
+        z.seqLength = r.seqLength;  z.seqPosition = r.seqPosition;
+        z.loRand = (float) r.loRand;  z.hiRand = (float) r.hiRand;
+        zones.push_back (z);
+    }
+
+    juce::String problem;
+    const int count = installZones (zones, problem, i.zones);
+    if (count == 0)
+    {
+        auto current = getInfo();
+        current.message = file.getFileName() + ": " + problem;
+        setInfo (current);
+        return false;
+    }
+
+    if (fresh)
+    {
+        // O que o arquivo disser sobre envelope e filtro vai para os botoes; o resto fica como estava.
+        if (parsed.hasAttack)   setParam ("attack", (float) juce::jmax (0.001, parsed.attack));
+        if (parsed.hasRelease)  setParam ("release", (float) juce::jmax (0.005, parsed.release));
+        if (parsed.hasCutoff)   setParam ("cutoff", (float) juce::jlimit (20.0, 20000.0, parsed.cutoff));
+    }
+
+    fileZones.clear();
+    i.message = problem;
+    setInfo (i);
+    return true;
+}
+
+bool DrikSamplerProcessor::loadFiles (const juce::Array<juce::File>& files)
+{
+    // Descobre a nota de cada arquivo: primeiro pelo nome, depois pela analise do som.
+    struct Item { juce::File file; int root; };
+    std::vector<Item> pitched, unpitched;
+
+    for (const auto& f : files)
+    {
+        int root = drik::noteFromFilename (f.getFileNameWithoutExtension().toStdString());
+
+        if (root < 0)
+        {
+            std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (f));
+            if (reader == nullptr || reader->lengthInSamples < 2)
+                continue;
+
+            const int n = (int) juce::jmin (reader->lengthInSamples, (juce::int64) (reader->sampleRate * 20.0));
+            juce::AudioBuffer<float> buf (1, n);
+            reader->read (&buf, 0, n, 0, true, false);
+            int first = 0, last = n;
+            if (drik::findSoundBounds (buf.getReadPointer (0), n, reader->sampleRate, first, last))
+                root = drik::detectNote (buf.getReadPointer (0) + first, last - first, reader->sampleRate);
+        }
+
+        (root >= 0 ? pitched : unpitched).push_back ({ f, root });
+    }
+
+    std::vector<ZoneDesc> zones;
+    juce::String note;
+
+    if (pitched.size() >= unpitched.size() && ! pitched.empty())
+    {
+        // Instrumento afinado: cada sample cobre das teclas a meio caminho do vizinho de baixo
+        // ate a meio caminho do vizinho de cima; as pontas vao ate o fim do teclado.
+        std::stable_sort (pitched.begin(), pitched.end(), [] (const Item& a, const Item& b) { return a.root < b.root; });
+
+        std::vector<int> roots;
+        for (const auto& it : pitched)
+            if (roots.empty() || roots.back() != it.root)
+                roots.push_back (it.root);
+
+        for (size_t r = 0; r < roots.size(); ++r)
+        {
+            const int lo = r == 0 ? 0 : (roots[r - 1] + roots[r]) / 2 + 1;
+            const int hi = r + 1 == roots.size() ? 127 : (roots[r] + roots[r + 1]) / 2;
+
+            std::vector<juce::File> same;                // varios samples da mesma nota: rodizio
+            for (const auto& it : pitched)
+                if (it.root == roots[r])
+                    same.push_back (it.file);
+
+            for (size_t k = 0; k < same.size(); ++k)
+            {
+                ZoneDesc z;
+                z.file = same[k];
+                z.loKey = lo;  z.hiKey = hi;  z.root = roots[r];
+                z.seqLength = (int) same.size();
+                z.seqPosition = (int) k + 1;
+                zones.push_back (z);
+            }
+        }
+
+        if (! unpitched.empty())
+            note = juce::String ((int) unpitched.size()) + juce::String::fromUTF8 (" sem nota definida ficaram de fora");
+    }
+    else
+    {
+        // Sons sem altura (percussao, efeitos): um por tecla, a partir do C2, cada um no seu tom natural.
+        int key = 36;
+        for (const auto& it : unpitched)
+        {
+            if (key > 127) break;
+            ZoneDesc z;
+            z.file = it.file;
+            z.loKey = z.hiKey = z.root = key++;
+            z.loopMode = 3;                              // toca ate o fim, como pad de bateria
+            zones.push_back (z);
+        }
+    }
+
+    juce::String problem;
+    InstrumentInfo i;
+    if (zones.empty() || installZones (zones, problem, i.zones) == 0)
+    {
+        auto current = getInfo();
+        current.message = juce::String::fromUTF8 ("n\xc3\xa3o consegui montar um instrumento com esses arquivos");
+        setInfo (current);
+        return false;
+    }
+
+    fileZones = zones;
+
+    i.mode = InstrumentInfo::files;
+    i.name = files.getFirst().getParentDirectory().getFileName();
+    i.message = problem.isNotEmpty() ? problem : note;
+    setInfo (i);
+    return true;
+}
+
+bool DrikSamplerProcessor::loadAnything (const juce::Array<juce::File>& dropped)
+{
+    juce::Array<juce::File> audio, sfzFiles;
+
+    auto consider = [&] (const juce::File& f)
+    {
+        if (f.hasFileExtension ("sfz"))
+            sfzFiles.add (f);
+        else if (formatManager.findFormatForFileExtension (f.getFileExtension()) != nullptr)
+            audio.add (f);
+    };
+
+    for (const auto& f : dropped)
+    {
+        if (f.isDirectory())
+            for (const auto& child : f.findChildFiles (juce::File::findFiles, true))
+                consider (child);
+        else
+            consider (f);
+    }
+
+    audio.sort();
+    sfzFiles.sort();
+
+    if (! sfzFiles.isEmpty())   return loadSfz (sfzFiles.getFirst(), -1, true);
+    if (audio.size() == 1)      return loadFile (audio.getFirst(), true);
+    if (audio.size() > 1)       return loadFiles (audio);
+    return false;
 }
 
 //==============================================================================
 void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
-    state.setProperty ("samplePath", getCurrentFile().getFullPathName(), nullptr);
+    const auto i = getInfo();
+
+    state.removeChild (state.getChildWithName ("ZONES"), nullptr);
+    state.setProperty ("mode", (int) i.mode, nullptr);
+    state.setProperty ("samplePath", i.file.getFullPathName(), nullptr);
+    state.setProperty ("program", i.program, nullptr);
+    state.setProperty ("instrumentName", i.name, nullptr);
+
+    if (i.mode == InstrumentInfo::files)
+    {
+        juce::ValueTree zones ("ZONES");
+        for (const auto& z : fileZones)
+        {
+            juce::ValueTree t ("ZONE");
+            t.setProperty ("path", z.file.getFullPathName(), nullptr);
+            t.setProperty ("lo", z.loKey, nullptr);
+            t.setProperty ("hi", z.hiKey, nullptr);
+            t.setProperty ("root", z.root, nullptr);
+            t.setProperty ("seqLength", z.seqLength, nullptr);
+            t.setProperty ("seqPosition", z.seqPosition, nullptr);
+            t.setProperty ("loopMode", z.loopMode, nullptr);
+            zones.addChild (t, -1, nullptr);
+        }
+        state.addChild (zones, -1, nullptr);
+    }
 
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
@@ -375,17 +794,60 @@ void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
 
 void DrikSamplerProcessor::setStateInformation (const void* data, int size)
 {
-    if (auto xml = getXmlFromBinary (data, size))
+    auto xml = getXmlFromBinary (data, size);
+    if (xml == nullptr)
+        return;
+
+    auto state = juce::ValueTree::fromXml (*xml);
+    if (! state.isValid())
+        return;
+
+    const auto path = state.getProperty ("samplePath").toString();
+    const int program = state.getProperty ("program", 0);
+    const auto zonesTree = state.getChildWithName ("ZONES").createCopy();
+
+    // Projetos salvos antes do multisample nao tem 'mode': sao sempre um sample so.
+    const int mode = state.getProperty ("mode", (int) InstrumentInfo::single);
+    const auto name = state.getProperty ("instrumentName").toString();
+
+    state.removeChild (state.getChildWithName ("ZONES"), nullptr);
+    apvts.replaceState (state);
+
+    if (mode == InstrumentInfo::sfz && juce::File::isAbsolutePath (path))
     {
-        auto state = juce::ValueTree::fromXml (*xml);
-        if (! state.isValid())
-            return;
+        loadSfz (juce::File (path), program, false);
+    }
+    else if (mode == InstrumentInfo::files && zonesTree.isValid())
+    {
+        std::vector<ZoneDesc> zones;
+        InstrumentInfo i;
+        i.mode = InstrumentInfo::files;
+        i.name = name;
 
-        const auto path = state.getProperty ("samplePath").toString();
-        apvts.replaceState (state);
+        for (const auto& t : zonesTree)
+        {
+            ZoneDesc z;
+            z.file = juce::File (t.getProperty ("path").toString());
+            z.loKey = t.getProperty ("lo", 0);
+            z.hiKey = t.getProperty ("hi", 127);
+            z.root = t.getProperty ("root", 60);
+            z.seqLength = t.getProperty ("seqLength", 1);
+            z.seqPosition = t.getProperty ("seqPosition", 1);
+            z.loopMode = t.getProperty ("loopMode", 0);
+            zones.push_back (z);
+        }
 
-        if (path.isNotEmpty() && juce::File::isAbsolutePath (path))
-            loadFile (juce::File (path), false);
+        juce::String problem;
+        if (installZones (zones, problem, i.zones) > 0)
+        {
+            fileZones = zones;
+            i.message = problem;
+            setInfo (i);
+        }
+    }
+    else if (path.isNotEmpty() && juce::File::isAbsolutePath (path))
+    {
+        loadFile (juce::File (path), false);
     }
 }
 

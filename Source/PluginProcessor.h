@@ -4,15 +4,28 @@
 #include <juce_dsp/juce_dsp.h>
 
 //==============================================================================
-/** O som carregado: o audio inteiro na memoria. */
+/** Um sample do instrumento, com a faixa de teclas em que ele toca.
+    No modo de um sample so (single), ele vale para o teclado todo e quem manda na
+    nota original, nos marcadores e no loop sao os botoes da tela. No modo multisample,
+    cada zona traz esses dados consigo (vindos do SFZ ou do mapeamento automatico). */
 struct DrikSound final : public juce::SynthesiserSound
 {
-    juce::AudioBuffer<float> data;
+    std::shared_ptr<juce::AudioBuffer<float>> data;     // pode ser dividido entre zonas
     int length = 0;
     double sourceRate = 44100.0;
 
-    bool appliesToNote (int) override      { return true; }
-    bool appliesToChannel (int) override   { return true; }
+    bool single = true;
+    int loKey = 0, hiKey = 127, loVel = 0, hiVel = 127, root = 60;
+    double tuneCents = 0.0, pitchRandomCents = 0.0;
+    float gain = 1.0f;
+    int offset = 0, end = 0;                // trecho tocado, em samples (end = um alem do ultimo)
+    int loopMode = 0;                       // 0 sem loop, 1 continuo, 2 enquanto a tecla esta presa, 3 toca ate o fim
+    int loopStart = 0, loopEnd = 0;
+    int seqLength = 1, seqPosition = 1;
+    float loRand = 0.0f, hiRand = 1.0f;
+
+    bool appliesToNote (int note) override   { return single || (note >= loKey && note <= hiKey); }
+    bool appliesToChannel (int) override     { return true; }
 };
 
 /** Ponteiros para os valores dos parametros, lidos pela thread de audio. */
@@ -57,8 +70,48 @@ private:
     juce::dsp::StateVariableTPTFilter<float> filter;
 
     double position = 0.0, ratio = 1.0, baseRatio = 1.0, bendSemis = 0.0;
+    bool released = false;
+    juce::Random random;
     float velocityGain = 1.0f;
     int note = 60;
+};
+
+//==============================================================================
+/** Sintetizador que escolhe as zonas pela tecla, pela forca e pelo rodizio (round robin). */
+class SamplerEngine final : public juce::Synthesiser
+{
+public:
+    void noteOn (int channel, int note, float velocity) override;
+
+private:
+    juce::Random random;
+    int sequence = 0;
+};
+
+/** Descricao de uma zona, antes de o audio ser carregado. */
+struct ZoneDesc
+{
+    juce::File file;
+    int loKey = 0, hiKey = 127, loVel = 0, hiVel = 127, root = 60;
+    double tuneCents = 0.0, pitchRandomCents = 0.0, volumeDb = 0.0;
+    juce::int64 offset = 0, end = -1;
+    int loopMode = 0;
+    juce::int64 loopStart = -1, loopEnd = -1;
+    int seqLength = 1, seqPosition = 1;
+    float loRand = 0.0f, hiRand = 1.0f;
+};
+
+/** O que a tela precisa saber sobre o instrumento carregado. */
+struct InstrumentInfo
+{
+    enum Mode { empty, single, sfz, files };
+    Mode mode = empty;
+    juce::String name, message;
+    juce::File file;                         // o audio (single) ou o .sfz
+    juce::StringArray programs;              // sons dentro do SFZ, quando ha mais de um
+    int program = 0;
+    struct Zone { int lo, hi, root; };
+    std::vector<Zone> zones;
 };
 
 //==============================================================================
@@ -92,10 +145,21 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    /** Carrega um arquivo de audio. Com fresh = true (som novo, escolhido pelo usuario)
-        tambem corta o silencio das pontas e descobre a nota original; com false
-        (projeto reaberto) respeita os valores salvos. */
+    /** Carrega um arquivo de audio como instrumento de um sample so. Com fresh = true (som novo,
+        escolhido pelo usuario) tambem corta o silencio das pontas e descobre a nota original;
+        com false (projeto reaberto) respeita os valores salvos. */
     bool loadFile (const juce::File&, bool fresh);
+
+    /** Abre um instrumento SFZ. program = indice na lista de sons do arquivo (-1 = o padrao). */
+    bool loadSfz (const juce::File&, int program, bool fresh);
+
+    /** Monta um instrumento com varios arquivos de audio, mapeando cada um pela sua nota. */
+    bool loadFiles (const juce::Array<juce::File>&);
+
+    /** Abre o que for solto na janela: um audio, um .sfz, varios audios ou uma pasta. */
+    bool loadAnything (const juce::Array<juce::File>&);
+
+    InstrumentInfo getInfo() const;
     juce::File getCurrentFile() const;
 
     juce::AudioProcessorValueTreeState apvts;
@@ -105,11 +169,17 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
-    juce::Synthesiser synth;
+    /** Carrega o audio das zonas e troca o instrumento. Devolve quantas zonas entraram. */
+    int installZones (const std::vector<ZoneDesc>&, juce::String& problem, std::vector<InstrumentInfo::Zone>& installed);
+    void setInfo (const InstrumentInfo&);
+    void setParam (const char* id, float value);
+
+    SamplerEngine synth;
+    std::vector<ZoneDesc> fileZones;          // so no modo 'files', para salvar no projeto
+    InstrumentInfo info;
     VoiceParams voiceParams;
 
     juce::CriticalSection fileLock;
-    juce::File currentFile;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrikSamplerProcessor)
 };

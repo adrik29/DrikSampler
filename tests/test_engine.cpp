@@ -219,6 +219,175 @@ int main()
         file.deleteFile();
     }
 
+    // ================= multisample e SFZ (v0.3) =================
+    {
+        std::printf ("--- multisample e SFZ\n");
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("drik_multi");
+        dir.deleteRecursively();
+        dir.getChildFile ("samples").createDirectory();
+
+        // Tres samples: Do 3 (130,8 Hz), Do 4 (261,6 Hz), Do 5 (523,3 Hz), cada um gravado na sua altura.
+        auto tone = [&] (const juce::String& name, int midi)
+        {
+            auto f = writeTone (name, 440.0 * std::pow (2.0, (midi - 69) / 12.0), 44100.0, 1);
+            auto dest = dir.getChildFile ("samples").getChildFile (name);
+            f.moveFileTo (dest);
+            return dest;
+        };
+        tone ("C3.wav", 48); tone ("C4.wav", 60); tone ("C5.wav", 72);
+        tone ("forte_C4.wav", 61);                       // de proposito meio tom acima, para distinguir a camada
+
+        dir.getChildFile ("teste.sfz").replaceWithText (
+            "<group> ampeg_attack=0.004 ampeg_release=0.08\r\n"
+            "<region> sample=samples\\C3.wav lokey=43 hikey=53 pitch_keycenter=48\r\n"
+            "<region> sample=samples\\C4.wav lokey=54 hikey=65 pitch_keycenter=60 hivel=90\r\n"
+            "<region> sample=samples\\forte_C4.wav lokey=54 hikey=65 pitch_keycenter=60 lovel=91\r\n"
+            "<region> sample=samples\\C5.wav lokey=66 hikey=77 pitch_keycenter=72 tune=100\r\n"
+            "<region> sample=samples\\nao_existe.wav key=20\r\n");
+
+        DrikSamplerProcessor p;
+        p.setPlayConfigDetails (0, 2, sr, block);
+        p.prepareToPlay (sr, block);
+        auto play = [&] (DrikSamplerProcessor& proc, int note, float vel, double seconds = 0.5)
+        {
+            juce::MidiBuffer on, off;
+            on.addEvent (juce::MidiMessage::noteOn (1, note, vel), 0);
+            auto v = render (proc, on, seconds, sr, block);
+            off.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+            render (proc, off, 1.0, sr, block);
+            return v;
+        };
+        auto pitch = [&] (const std::vector<float>& v) { return drik::hzToMidiNote (drik::detectPitchHz (v.data(), (int) v.size(), sr)); };
+
+        check (p.loadSfz (dir.getChildFile ("teste.sfz"), -1, true), "abre o SFZ");
+        auto info = p.getInfo();
+        check (info.mode == InstrumentInfo::sfz && info.zones.size() == 4, "SFZ: 4 zonas carregadas (a de arquivo ausente fica de fora)");
+        check (info.message.contains ("1 arquivo"), "SFZ: avisa do arquivo ausente");
+        check (std::abs (p.apvts.getRawParameterValue ("release")->load() - 0.08f) < 0.001f, "SFZ: release do arquivo vai para o botao");
+
+        check (pitch (play (p, 48, 0.5f)) == 48, "zona 1: tecla na nota original");
+        check (pitch (play (p, 52, 0.5f)) == 52, "zona 1: tecla acima da original, mesma zona");
+        check (pitch (play (p, 60, 0.5f)) == 60, "zona 2: camada fraca");
+        check (pitch (play (p, 60, 1.0f)) == 61, "zona 2: camada forte toca o outro sample");
+        check (pitch (play (p, 57, 0.5f)) == 57, "zona 2: abaixo da original");
+        check (pitch (play (p, 72, 0.5f)) == 73, "zona 3: tune=100 sobe um semitom");
+        check (peakOf (play (p, 30, 1.0f)) == 0.0f && peakOf (play (p, 90, 1.0f)) == 0.0f, "fora das zonas: silencio");
+        check (peakOf (play (p, 60, 0.5f, 5.0), (size_t) (4.0 * sr)) == 0.0f, "nota presa acaba no fim do sample (sem loop)");
+
+        // Os botoes de um sample so nao podem interferir no multisample.
+        p.apvts.getParameter ("root")->setValueNotifyingHost (0.1f);
+        p.apvts.getParameter ("start")->setValueNotifyingHost (0.9f);
+        check (pitch (play (p, 48, 0.5f)) == 48 && peakOf (play (p, 48, 0.5f)) > 0.1f, "nota original e marcadores da tela nao afetam o multisample");
+        p.apvts.getParameter ("start")->setValueNotifyingHost (0.0f);
+
+        // Acorde atravessando as tres zonas.
+        juce::MidiBuffer chord;
+        for (int n : { 48, 55, 60, 64, 72 }) chord.addEvent (juce::MidiMessage::noteOn (1, n, 0.6f), 0);
+        auto c = render (p, chord, 0.5, sr, block);
+        bool fin = true; for (float v : c) fin = fin && std::isfinite (v);
+        check (fin && peakOf (c) > 0.2f, "acorde atravessando zonas");
+        juce::MidiBuffer quiet; quiet.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+        render (p, quiet, 1.0, sr, block);
+
+        // Projeto salvo e reaberto.
+        juce::MemoryBlock st;
+        p.getStateInformation (st);
+        DrikSamplerProcessor q;
+        q.setPlayConfigDetails (0, 2, sr, block);
+        q.prepareToPlay (sr, block);
+        q.setStateInformation (st.getData(), (int) st.getSize());
+        check (q.getInfo().mode == InstrumentInfo::sfz && q.getInfo().zones.size() == 4 && pitch (play (q, 52, 0.5f)) == 52, "projeto reaberto: SFZ de volta");
+
+        // Loop dentro da zona e programas por keyswitch.
+        dir.getChildFile ("b.sfz").replaceWithText (
+            "<global> sw_default=1\n"
+            "<group> sw_last=0 sw_label=Grave\n<region> sample=samples/C3.wav key=c3 lokey=0 hikey=127 loop_mode=loop_continuous loop_start=4410 loop_end=22049\n"
+            "<group> sw_last=1 sw_label=Agudo\n<region> sample=samples/C5.wav key=c5 lokey=0 hikey=127 loop_mode=one_shot\n");
+        check (p.loadSfz (dir.getChildFile ("b.sfz"), -1, true), "abre SFZ com dois sons");
+        info = p.getInfo();
+        check (info.programs.size() == 2 && info.programs[1] == "Agudo" && info.program == 1, "lista de sons e som padrao");
+        check (pitch (play (p, 72, 0.8f)) == 72, "som padrao (Agudo)");
+        {
+            juce::MidiBuffer on, off;
+            on.addEvent (juce::MidiMessage::noteOn (1, 72, 0.8f), 0);
+            render (p, on, 0.1, sr, block);
+            off.addEvent (juce::MidiMessage::noteOff (1, 72), 0);
+            auto after = render (p, off, 1.0, sr, block);
+            check (peakOf (after, (size_t) (0.6 * sr)) > 0.1f, "one_shot: continua tocando depois de soltar a tecla");
+            render (p, quiet, 3.5, sr, block);
+        }
+        check (p.loadSfz (dir.getChildFile ("b.sfz"), 0, false), "troca para o outro som");
+        auto looped = play (p, 48, 0.8f, 6.0);
+        check (peakOf (looped, (size_t) (5.0 * sr)) > 0.1f && pitch (looped) == 48, "loop da zona: nota presa segue soando alem do fim do sample");
+
+        // Varios arquivos soltos: mapeamento automatico pela nota do nome.
+        juce::Array<juce::File> drop;
+        for (auto n : { "C3.wav", "C4.wav", "C5.wav" }) drop.add (dir.getChildFile ("samples").getChildFile (n));
+        check (p.loadAnything (drop), "tres arquivos soltos viram um instrumento");
+        info = p.getInfo();
+        check (info.mode == InstrumentInfo::files && info.zones.size() == 3, "tres zonas");
+        if (info.zones.size() == 3)
+            check (info.zones[0].lo == 0 && info.zones[0].hi == 54 && info.zones[1].lo == 55 && info.zones[1].hi == 66 && info.zones[2].hi == 127,
+                   "faixas divididas a meio caminho entre as notas");
+        check (pitch (play (p, 50, 0.7f)) == 50 && pitch (play (p, 62, 0.7f)) == 62 && pitch (play (p, 79, 0.7f)) == 79, "afinado no teclado todo");
+        p.getStateInformation (st);
+        DrikSamplerProcessor r2;
+        r2.setPlayConfigDetails (0, 2, sr, block);
+        r2.prepareToPlay (sr, block);
+        r2.setStateInformation (st.getData(), (int) st.getSize());
+        check (r2.getInfo().mode == InstrumentInfo::files && pitch (play (r2, 62, 0.7f)) == 62, "projeto reaberto: instrumento de arquivos soltos de volta");
+
+        // A pasta inteira: acha o .sfz e abre por ele.
+        juce::Array<juce::File> folder; folder.add (dir);
+        check (p.loadAnything (folder) && p.getInfo().mode == InstrumentInfo::sfz, "pasta solta: abre pelo .sfz que estiver dentro");
+
+        // Um arquivo so continua sendo o modo antigo.
+        juce::Array<juce::File> one; one.add (dir.getChildFile ("samples").getChildFile ("C4.wav"));
+        check (p.loadAnything (one) && p.getInfo().mode == InstrumentInfo::single
+               && (int) p.apvts.getRawParameterValue ("root")->load() == 60 && pitch (play (p, 67, 0.7f)) == 67, "um arquivo: modo de um sample, como antes");
+
+        // SFZ invalido nao derruba o instrumento atual.
+        dir.getChildFile ("ruim.sfz").replaceWithText ("isto nao e um sfz");
+        check (! p.loadSfz (dir.getChildFile ("ruim.sfz"), -1, true) && p.getInfo().mode == InstrumentInfo::single
+               && p.getInfo().message.isNotEmpty() && pitch (play (p, 67, 0.7f)) == 67, "SFZ invalido: avisa e mantem o instrumento anterior");
+        dir.deleteRecursively();
+    }
+
+    // ================= bibliotecas reais, se estiverem no disco =================
+    for (const char* path : { "/home/claude/libs/Mellotron-SFZ/Mellotron/String Section/String Section.sfz",
+                              "/home/claude/libs/Mellotron-SFZ/Mellotron/Combined Choir/Combined Choir.sfz" })
+    {
+        juce::File f (path);
+        if (! f.existsAsFile()) continue;
+        DrikSamplerProcessor p;
+        p.setPlayConfigDetails (0, 2, sr, block);
+        p.prepareToPlay (sr, block);
+        const bool ok = p.loadSfz (f, -1, true);
+        const auto info = p.getInfo();
+        int right = 0, near = 0, total = 0; float quietest = 10.0f, loudest = 0.0f; double longest = 0.0;
+        for (int n = 43; ok && n <= 77; ++n)
+        {
+            juce::MidiBuffer on, off;
+            on.addEvent (juce::MidiMessage::noteOn (1, n, 1.0f), 0);
+            auto v = render (p, on, 9.0, sr, block);
+            off.addEvent (juce::MidiMessage::noteOff (1, n), 0);
+            render (p, off, 0.5, sr, block);
+            const double hz = drik::detectPitchHz (v.data() + (int) (0.3 * sr), (int) (1.5 * sr), sr);
+            const double semis = hz > 0 ? 69.0 + 12.0 * std::log2 (hz / 440.0) : -1.0;
+            ++total;
+            if (std::abs (semis - n) < 0.5) ++right;
+            if (std::abs (semis - n) < 0.5 || std::abs (std::fmod (std::abs (semis - n), 12.0)) < 0.5 || std::abs (std::fmod (std::abs (semis - n), 12.0) - 12.0) < 0.5) ++near;
+            const float pk = peakOf (v);
+            quietest = std::min (quietest, pk); loudest = std::max (loudest, pk);
+            size_t last = 0; for (size_t k = 0; k < v.size(); ++k) if (std::fabs (v[k]) > 0.001f) last = k;
+            longest = std::max (longest, (double) last / sr);
+        }
+        std::printf ("%s: %s, %d zonas, %s | afinacao certa em %d de %d teclas (%d contando oitavas) | pico %.2f a %.2f | nota mais longa %.1f s\n",
+                     f.getFileNameWithoutExtension().toRawUTF8(), ok ? "abriu" : "NAO ABRIU", (int) info.zones.size(), info.message.toRawUTF8(),
+                     right, total, near, quietest, loudest, longest);
+        check (ok && info.zones.size() == 35 && quietest > 0.01f && near >= 30, "biblioteca real abre e toca afinada");
+    }
+
     std::printf (fails == 0 ? "\ntudo certo\n" : "\n%d falhas\n", fails);
     return fails;
 }

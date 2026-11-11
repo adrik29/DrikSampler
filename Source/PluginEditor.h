@@ -47,12 +47,65 @@ private:
 };
 
 //==============================================================================
+/** Mapa do instrumento multisample: que sample cobre que teclas, alinhado com o teclado da tela. */
+class MapView final : public juce::Component
+{
+public:
+    std::function<juce::Rectangle<float> (int)> keyRectangle;     // posicao de cada tecla no teclado de baixo
+
+    void setInfo (const InstrumentInfo& i)   { info = i; repaint(); }
+    void setDragHighlight (bool h)           { highlight = h; repaint(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    InstrumentInfo info;
+    bool highlight = false;
+};
+
+/** Teclado da tela em que Z e X mudam a oitava do teclado do computador. */
+class OctaveKeyboard final : public juce::MidiKeyboardComponent
+{
+public:
+    explicit OctaveKeyboard (juce::MidiKeyboardState& s)
+        : juce::MidiKeyboardComponent (s, horizontalKeyboard), state (s)
+    {
+        setKeyPressBaseOctave (octave);
+    }
+
+    int getOctave() const   { return octave; }
+    std::function<void()> onOctaveChange;
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        const auto c = juce::CharacterFunctions::toLowerCase (key.getTextCharacter());
+        if (c == 'z' || c == 'x')
+        {
+            const int next = juce::jlimit (1, 9, octave + (c == 'x' ? 1 : -1));
+            if (next != octave)
+            {
+                state.allNotesOff (1);
+                octave = next;
+                setKeyPressBaseOctave (octave);
+                if (onOctaveChange) onOctaveChange();
+            }
+            return true;
+        }
+        return juce::MidiKeyboardComponent::keyPressed (key);
+    }
+
+private:
+    juce::MidiKeyboardState& state;
+    int octave = 5;
+};
+
+//==============================================================================
 /** Um botao giratorio com o nome embaixo. */
 class Knob final : public juce::Component
 {
 public:
     Knob (juce::AudioProcessorValueTreeState&, const juce::String& paramID, const juce::String& title);
     void resized() override;
+    const juce::String id;
 
 private:
     juce::Slider slider;
@@ -73,25 +126,29 @@ public:
     void resized() override;
 
     bool isInterestedInFileDrag (const juce::StringArray&) override   { return true; }
-    void fileDragEnter (const juce::StringArray&, int, int) override  { waveform.setDragHighlight (true); }
-    void fileDragExit (const juce::StringArray&) override             { waveform.setDragHighlight (false); }
+    void fileDragEnter (const juce::StringArray&, int, int) override  { waveform.setDragHighlight (true);  mapView.setDragHighlight (true); }
+    void fileDragExit (const juce::StringArray&) override             { waveform.setDragHighlight (false); mapView.setDragHighlight (false); }
     void filesDropped (const juce::StringArray&, int, int) override;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override   { refreshFromProcessor(); }
     void refreshFromProcessor();
     void openFile();
-    void tryLoad (const juce::File&);
+    void tryLoad (const juce::Array<juce::File>&);
+    void showOctave();
 
     DrikSamplerProcessor& processor;
 
-    juce::Label title, versionLabel, fileLabel;
+    juce::Label title, versionLabel, fileLabel, octaveLabel;
+    juce::ComboBox programBox;
+    MapView mapView;
+    bool refreshing = false;
     juce::TextButton openButton;
     juce::ToggleButton loopButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttachment;
     WaveformView waveform;
     juce::OwnedArray<Knob> knobs;
-    juce::MidiKeyboardComponent keyboard;
+    OctaveKeyboard keyboard;
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DrikSamplerEditor)
