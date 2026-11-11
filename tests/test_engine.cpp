@@ -353,6 +353,116 @@ int main()
         dir.deleteRecursively();
     }
 
+    // ================= favoritos, pasta-mae e biblioteca (v0.4) =================
+    {
+        std::printf ("--- favoritos e biblioteca\n");
+        auto base = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("drik_fav");
+        base.deleteRecursively();
+        auto rootA = base.getChildFile ("SamplesA"), rootB = base.getChildFile ("SamplesB"), favs = base.getChildFile ("Favoritos");
+        auto put = [&] (const juce::File& folder, const juce::String& name, int midi)
+        {
+            folder.createDirectory();
+            auto f = writeTone (name, 440.0 * std::pow (2.0, (midi - 69) / 12.0), 44100.0, 1);
+            f.moveFileTo (folder.getChildFile (name));
+        };
+        // Biblioteca com .sfz, pasta de samples com nome de nota, e sons avulsos.
+        put (rootA.getChildFile ("Mellotron/Cordas/samples"), "C3.wav", 48);
+        put (rootA.getChildFile ("Mellotron/Cordas/samples"), "C4.wav", 60);
+        rootA.getChildFile ("Mellotron/Cordas/Cordas.sfz").replaceWithText ("<region> sample=samples/C3.wav key=c3 lokey=0 hikey=54\n<region> sample=samples/C4.wav key=c4 lokey=55 hikey=127\n");
+        put (rootA.getChildFile ("Nord/Coro"), "Coro C3.wav", 48);
+        put (rootA.getChildFile ("Nord/Coro"), "Coro G3.wav", 55);
+        put (rootA.getChildFile ("Nord/Coro"), "Coro C4.wav", 60);
+        put (rootA.getChildFile ("Bichos"), "javali.wav", 50);
+        put (rootA.getChildFile ("Bichos"), "cabrito.wav", 64);
+
+        const auto oldRoot = DrikSamplerProcessor::getSamplesRoot();
+        const auto oldFavs = DrikSamplerProcessor::getFavoritesFolder();
+        DrikSamplerProcessor::setSamplesRoot (rootA);
+        DrikSamplerProcessor::setFavoritesFolder (favs);
+        check (DrikSamplerProcessor::getSamplesRoot() == rootA && DrikSamplerProcessor::getFavoritesFolder() == favs, "pastas escolhidas ficam guardadas");
+
+        DrikSamplerProcessor p;
+        p.setPlayConfigDetails (0, 2, sr, block);
+        p.prepareToPlay (sr, block);
+        auto play = [&] (DrikSamplerProcessor& proc, int note)
+        {
+            juce::MidiBuffer on, off;
+            on.addEvent (juce::MidiMessage::noteOn (1, note, 0.8f), 0);
+            auto v = render (proc, on, 0.5, sr, block);
+            off.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+            render (proc, off, 1.0, sr, block);
+            return drik::hzToMidiNote (drik::detectPitchHz (v.data(), (int) v.size(), sr));
+        };
+
+        const auto lib = p.scanLibrary();
+        juce::StringArray labels;
+        for (auto& e : lib) labels.add (e.label + " [" + e.group + "] x" + juce::String (e.files.size()));
+        check (lib.size() == 4, "biblioteca: 4 entradas (1 sfz, 1 pasta-instrumento, 2 sons avulsos)");
+        check (labels.contains ("Mellotron/Cordas/Cordas [Mellotron] x1"), "biblioteca: o .sfz aparece uma vez, sem listar os samples dele");
+        check (labels.contains ("Nord/Coro [Nord] x3"), "biblioteca: pasta com nomes de nota vira um instrumento so");
+        check (labels.contains ("Bichos/javali [Bichos] x1") && labels.contains ("Bichos/cabrito [Bichos] x1"), "biblioteca: sons avulsos ficam um por entrada");
+        if (lib.size() != 4) std::printf ("   achei: %s\n", labels.joinIntoString (" | ").toRawUTF8());
+
+        // Favorito de um SFZ com regulagem propria.
+        check (p.loadSfz (rootA.getChildFile ("Mellotron/Cordas/Cordas.sfz"), -1, true), "abre o sfz da biblioteca");
+        auto setP = [&] (DrikSamplerProcessor& proc, const char* id, float v) { auto* prm = proc.apvts.getParameter (id); prm->setValueNotifyingHost (prm->convertTo0to1 (v)); };
+        setP (p, "release", 1.5f); setP (p, "cutoff", 3000.0f); setP (p, "tune", 2.0f); setP (p, "velsens", 0.3f);
+        check (p.saveFavorite (favs.getChildFile ("Cordas do meu jeito.drikinst")), "salva o favorito");
+        check (p.getInfo().name == "Cordas do meu jeito", "o instrumento passa a ter o nome do favorito");
+        check (favs.getChildFile ("Cordas do meu jeito.drikinst").loadFileAsString().contains ("$ROOT/Mellotron/Cordas/Cordas.sfz"), "o favorito guarda o caminho a partir da pasta-mae");
+
+        // Favorito de pasta-instrumento e de som avulso.
+        for (auto& e : lib) if (e.label == "Nord/Coro") check (p.loadAnything (e.files) && p.getInfo().mode == InstrumentInfo::files, "abre a pasta-instrumento");
+        check (play (p, 57) == 59, "pasta-instrumento toca afinada (com os +2 semitons que estao no botao)");
+        check (p.saveFavorite (favs.getChildFile ("Coro.drikinst")), "salva favorito de pasta");
+        for (auto& e : lib) if (e.label == "Bichos/javali") p.loadAnything (e.files);
+        setP (p, "attack", 0.5f);
+        check (p.getInfo().mode == InstrumentInfo::single && p.saveFavorite (favs.getChildFile ("Javali lento.drikinst")), "salva favorito de som avulso");
+        check (DrikSamplerProcessor::favoriteFiles().size() == 3, "tres favoritos na pasta");
+
+        // Outra janela do sampler, com outra sensibilidade, carrega o favorito.
+        DrikSamplerProcessor q;
+        q.setPlayConfigDetails (0, 2, sr, block);
+        q.prepareToPlay (sr, block);
+        setP (q, "velsens", 0.9f);
+        check (q.loadFavorite (favs.getChildFile ("Cordas do meu jeito.drikinst")), "carrega o favorito");
+        check (q.getInfo().mode == InstrumentInfo::sfz && q.getInfo().name == "Cordas do meu jeito", "favorito: instrumento e nome");
+        check (std::abs (q.apvts.getRawParameterValue ("release")->load() - 1.5f) < 0.01f
+               && std::abs (q.apvts.getRawParameterValue ("cutoff")->load() - 3000.0f) < 1.0f, "favorito: regulagem dos botoes de volta");
+        check (std::abs (q.apvts.getRawParameterValue ("velsens")->load() - 0.9f) < 0.01f, "favorito nao mexe na sensibilidade");
+        check (play (q, 60) == 62, "favorito toca com a afinacao salva (+2 semitons)");
+
+        // A pasta dos samples muda de lugar: basta apontar a nova.
+        check (rootA.moveFileTo (rootB), "move a pasta dos samples");
+        check (! q.loadFavorite (favs.getChildFile ("Coro.drikinst")) && q.getInfo().message.isNotEmpty(), "pasta sumiu: avisa, sem travar");
+        check (q.getInfo().mode == InstrumentInfo::sfz, "pasta sumiu: o instrumento anterior continua carregado");
+        DrikSamplerProcessor::setSamplesRoot (rootB);
+        check (q.loadFavorite (favs.getChildFile ("Coro.drikinst")) && q.getInfo().mode == InstrumentInfo::files && play (q, 57) == 59,
+               "pasta nova apontada: o favorito de pasta volta, com a afinacao que foi salva nele");
+        check (q.loadFavorite (favs.getChildFile ("Javali lento.drikinst")) && q.getInfo().mode == InstrumentInfo::single
+               && std::abs (q.apvts.getRawParameterValue ("attack")->load() - 0.5f) < 0.01f, "favorito de som avulso volta com a regulagem");
+        check (q.loadFavorite (favs.getChildFile ("Cordas do meu jeito.drikinst")) && play (q, 60) == 62, "favorito do sfz volta na pasta nova");
+
+        // Projeto do Reaper tambem sobrevive a mudanca de pasta.
+        juce::MemoryBlock st;
+        q.getStateInformation (st);
+        check (rootB.moveFileTo (rootA), "move de volta");
+        DrikSamplerProcessor::setSamplesRoot (rootA);
+        DrikSamplerProcessor r3;
+        r3.setPlayConfigDetails (0, 2, sr, block);
+        r3.prepareToPlay (sr, block);
+        r3.setStateInformation (st.getData(), (int) st.getSize());
+        check (r3.getInfo().mode == InstrumentInfo::sfz && play (r3, 60) == 62, "projeto salvo reabre depois de a pasta dos samples mudar de lugar");
+
+        check (! p.loadFavorite (favs.getChildFile ("nao existe.drikinst")), "favorito inexistente: recusa");
+        favs.getChildFile ("lixo.drikinst").replaceWithText ("nada");
+        check (! p.loadFavorite (favs.getChildFile ("lixo.drikinst")), "favorito corrompido: recusa");
+
+        DrikSamplerProcessor::setSamplesRoot (oldRoot);
+        DrikSamplerProcessor::setFavoritesFolder (oldFavs);
+        base.deleteRecursively();
+    }
+
     // ================= bibliotecas reais, se estiverem no disco =================
     for (const char* path : { "/home/claude/libs/Mellotron-SFZ/Mellotron/String Section/String Section.sfz",
                               "/home/claude/libs/Mellotron-SFZ/Mellotron/Combined Choir/Combined Choir.sfz" })

@@ -3,6 +3,7 @@
 #include "PitchDetect.h"
 #include "SfzParser.h"
 #include <map>
+#include <set>
 
 //==============================================================================
 void DrikVoice::setCurrentPlaybackSampleRate (double newRate)
@@ -759,14 +760,82 @@ bool DrikSamplerProcessor::loadAnything (const juce::Array<juce::File>& dropped)
 }
 
 //==============================================================================
-void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
+// Ajustes do usuario, num arquivo proprio (compartilhado entre o programa avulso e o plugin).
+static std::unique_ptr<juce::PropertiesFile> openSettings()
 {
-    auto state = apvts.copyState();
+    juce::PropertiesFile::Options o;
+    o.applicationName = "DrikSampler";
+    o.filenameSuffix = ".settings";
+    o.folderName = "DrikSampler";
+    o.osxLibrarySubFolder = "Application Support";
+    return std::make_unique<juce::PropertiesFile> (o);
+}
+
+juce::File DrikSamplerProcessor::getSamplesRoot()
+{
+    const auto path = openSettings()->getValue ("samplesRoot");
+    return juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File();
+}
+
+void DrikSamplerProcessor::setSamplesRoot (const juce::File& folder)
+{
+    auto settings = openSettings();
+    settings->setValue ("samplesRoot", folder.getFullPathName());
+    settings->saveIfNeeded();
+}
+
+juce::File DrikSamplerProcessor::getFavoritesFolder()
+{
+    const auto path = openSettings()->getValue ("favoritesFolder");
+    if (juce::File::isAbsolutePath (path))
+        return juce::File (path);
+
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+               .getChildFile ("DrikSampler").getChildFile ("Instrumentos");
+}
+
+void DrikSamplerProcessor::setFavoritesFolder (const juce::File& folder)
+{
+    auto settings = openSettings();
+    settings->setValue ("favoritesFolder", folder.getFullPathName());
+    settings->saveIfNeeded();
+}
+
+juce::Array<juce::File> DrikSamplerProcessor::favoriteFiles()
+{
+    auto files = getFavoritesFolder().findChildFiles (juce::File::findFiles, false, "*.drikinst");
+    files.sort();
+    return files;
+}
+
+// Caminho dentro da pasta-mae vira "$ROOT/...": se a pasta mudar de lugar, basta apontar o novo.
+juce::String DrikSamplerProcessor::toPortable (const juce::File& file)
+{
+    const auto root = getSamplesRoot();
+    if (root != juce::File() && file.isAChildOf (root))
+        return "$ROOT/" + file.getRelativePathFrom (root).replaceCharacter ('\\', '/');
+    return file.getFullPathName();
+}
+
+juce::File DrikSamplerProcessor::fromPortable (const juce::String& text)
+{
+    if (text.startsWith ("$ROOT/"))
+    {
+        const auto root = getSamplesRoot();
+        return root != juce::File() ? root.getChildFile (text.substring (6)) : juce::File();
+    }
+    return juce::File::isAbsolutePath (text) ? juce::File (text) : juce::File();
+}
+
+//==============================================================================
+juce::ValueTree DrikSamplerProcessor::buildState() const
+{
+    auto state = const_cast<juce::AudioProcessorValueTreeState&> (apvts).copyState();
     const auto i = getInfo();
 
     state.removeChild (state.getChildWithName ("ZONES"), nullptr);
     state.setProperty ("mode", (int) i.mode, nullptr);
-    state.setProperty ("samplePath", i.file.getFullPathName(), nullptr);
+    state.setProperty ("samplePath", i.file != juce::File() ? toPortable (i.file) : juce::String(), nullptr);
     state.setProperty ("program", i.program, nullptr);
     state.setProperty ("instrumentName", i.name, nullptr);
 
@@ -776,7 +845,7 @@ void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
         for (const auto& z : fileZones)
         {
             juce::ValueTree t ("ZONE");
-            t.setProperty ("path", z.file.getFullPathName(), nullptr);
+            t.setProperty ("path", toPortable (z.file), nullptr);
             t.setProperty ("lo", z.loKey, nullptr);
             t.setProperty ("hi", z.hiKey, nullptr);
             t.setProperty ("root", z.root, nullptr);
@@ -788,21 +857,15 @@ void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
         state.addChild (zones, -1, nullptr);
     }
 
-    if (auto xml = state.createXml())
-        copyXmlToBinary (*xml, dest);
+    return state;
 }
 
-void DrikSamplerProcessor::setStateInformation (const void* data, int size)
+bool DrikSamplerProcessor::applyState (juce::ValueTree state)
 {
-    auto xml = getXmlFromBinary (data, size);
-    if (xml == nullptr)
-        return;
-
-    auto state = juce::ValueTree::fromXml (*xml);
     if (! state.isValid())
-        return;
+        return false;
 
-    const auto path = state.getProperty ("samplePath").toString();
+    const auto file = fromPortable (state.getProperty ("samplePath").toString());
     const int program = state.getProperty ("program", 0);
     const auto zonesTree = state.getChildWithName ("ZONES").createCopy();
 
@@ -813,11 +876,10 @@ void DrikSamplerProcessor::setStateInformation (const void* data, int size)
     state.removeChild (state.getChildWithName ("ZONES"), nullptr);
     apvts.replaceState (state);
 
-    if (mode == InstrumentInfo::sfz && juce::File::isAbsolutePath (path))
-    {
-        loadSfz (juce::File (path), program, false);
-    }
-    else if (mode == InstrumentInfo::files && zonesTree.isValid())
+    if (mode == InstrumentInfo::sfz)
+        return file != juce::File() && loadSfz (file, program, false);
+
+    if (mode == InstrumentInfo::files && zonesTree.isValid())
     {
         std::vector<ZoneDesc> zones;
         InstrumentInfo i;
@@ -827,7 +889,7 @@ void DrikSamplerProcessor::setStateInformation (const void* data, int size)
         for (const auto& t : zonesTree)
         {
             ZoneDesc z;
-            z.file = juce::File (t.getProperty ("path").toString());
+            z.file = fromPortable (t.getProperty ("path").toString());
             z.loKey = t.getProperty ("lo", 0);
             z.hiKey = t.getProperty ("hi", 127);
             z.root = t.getProperty ("root", 60);
@@ -838,17 +900,167 @@ void DrikSamplerProcessor::setStateInformation (const void* data, int size)
         }
 
         juce::String problem;
-        if (installZones (zones, problem, i.zones) > 0)
+        if (installZones (zones, problem, i.zones) == 0)
+            return false;
+
+        fileZones = zones;
+        i.message = problem;
+        setInfo (i);
+        return true;
+    }
+
+    return file != juce::File() && loadFile (file, false);
+}
+
+void DrikSamplerProcessor::getStateInformation (juce::MemoryBlock& dest)
+{
+    if (auto xml = buildState().createXml())
+        copyXmlToBinary (*xml, dest);
+}
+
+void DrikSamplerProcessor::setStateInformation (const void* data, int size)
+{
+    if (auto xml = getXmlFromBinary (data, size))
+        applyState (juce::ValueTree::fromXml (*xml));
+}
+
+//==============================================================================
+bool DrikSamplerProcessor::saveFavorite (const juce::File& file)
+{
+    if (getInfo().mode == InstrumentInfo::empty)
+        return false;
+
+    auto state = buildState();
+    state.setProperty ("instrumentName", file.getFileNameWithoutExtension(), nullptr);
+
+    auto xml = state.createXml();
+    if (xml == nullptr || ! file.getParentDirectory().createDirectory() || ! xml->writeTo (file))
+        return false;
+
+    auto i = getInfo();
+    i.name = file.getFileNameWithoutExtension();
+    setInfo (i);
+    return true;
+}
+
+bool DrikSamplerProcessor::loadFavorite (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr)
+        return false;
+
+    auto state = juce::ValueTree::fromXml (*xml);
+    if (! state.isValid() || ! state.hasProperty ("mode"))
+        return false;
+
+    // A sensibilidade depende do teclado de quem toca, nao do instrumento: o favorito nao mexe nela.
+    const float sensitivity = apvts.getRawParameterValue ("velsens")->load();
+    const bool ok = applyState (state);
+    setParam ("velsens", sensitivity);
+
+    auto i = getInfo();
+    if (ok)
+    {
+        i.name = file.getFileNameWithoutExtension();
+    }
+    else
+    {
+        i.message = file.getFileNameWithoutExtension()
+                    + juce::String::fromUTF8 (": n\xc3\xa3o achei os samples. Confira a pasta dos samples em Pastas...");
+    }
+    setInfo (i);
+    return ok;
+}
+
+//==============================================================================
+std::vector<DrikSamplerProcessor::LibraryEntry> DrikSamplerProcessor::scanLibrary() const
+{
+    std::vector<LibraryEntry> entries;
+    const auto root = getSamplesRoot();
+    if (! root.isDirectory())
+        return entries;
+
+    auto& fm = const_cast<juce::AudioFormatManager&> (formatManager);
+    const auto all = root.findChildFiles (juce::File::findFiles, true);
+
+    auto relative = [&root] (const juce::File& f)
+    {
+        return f.getRelativePathFrom (root).replaceCharacter ('\\', '/');
+    };
+    auto groupOf = [] (const juce::String& rel)
+    {
+        return rel.containsChar ('/') ? rel.upToFirstOccurrenceOf ("/", false, false) : juce::String ("Samples");
+    };
+
+    // Pastas que tem um .sfz: tudo o que estiver nelas ou abaixo delas ja e coberto pelo .sfz.
+    std::set<juce::String> sfzFolders;
+    for (const auto& f : all)
+        if (f.hasFileExtension ("sfz"))
+            sfzFolders.insert (f.getParentDirectory().getFullPathName());
+
+    auto coveredBySfz = [&] (juce::File dir)
+    {
+        while (dir != root && dir.isAChildOf (root))
         {
-            fileZones = zones;
-            i.message = problem;
-            setInfo (i);
+            if (sfzFolders.count (dir.getFullPathName()) > 0)
+                return true;
+            dir = dir.getParentDirectory();
+        }
+        return false;
+    };
+
+    std::map<juce::String, juce::Array<juce::File>> audioByFolder;
+
+    for (const auto& f : all)
+    {
+        if (f.hasFileExtension ("sfz"))
+        {
+            const auto rel = relative (f).upToLastOccurrenceOf (".", false, false);
+            entries.push_back ({ rel, groupOf (rel), { f } });
+        }
+        else if (fm.findFormatForFileExtension (f.getFileExtension()) != nullptr && ! coveredBySfz (f.getParentDirectory()))
+        {
+            audioByFolder[f.getParentDirectory().getFullPathName()].add (f);
         }
     }
-    else if (path.isNotEmpty() && juce::File::isAbsolutePath (path))
+
+    for (auto& kv : audioByFolder)
     {
-        loadFile (juce::File (path), false);
+        auto& files = kv.second;
+        files.sort();
+
+        int named = 0;
+        for (const auto& f : files)
+            if (drik::noteFromFilename (f.getFileNameWithoutExtension().toStdString()) >= 0)
+                ++named;
+
+        const juce::File folder (kv.first);
+
+        if (files.size() >= 2 && named * 10 >= files.size() * 6 && folder != root)
+        {
+            // Pasta de samples com nome de nota: e um instrumento so.
+            const auto rel = relative (folder);
+            entries.push_back ({ rel, groupOf (rel), files });
+        }
+        else
+        {
+            // Sons avulsos: cada arquivo e uma entrada.
+            for (const auto& f : files)
+            {
+                const auto rel = relative (f).upToLastOccurrenceOf (".", false, false);
+                entries.push_back ({ rel, groupOf (rel), { f } });
+            }
+        }
+
+        if (entries.size() > 3000)
+            break;
     }
+
+    std::sort (entries.begin(), entries.end(), [] (const LibraryEntry& a, const LibraryEntry& b)
+    {
+        return a.label.compareNatural (b.label) < 0;
+    });
+    return entries;
 }
 
 juce::AudioProcessorEditor* DrikSamplerProcessor::createEditor()

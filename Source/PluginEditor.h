@@ -136,14 +136,25 @@ private:
     void openFile();
     void tryLoad (const juce::Array<juce::File>&);
     void showOctave();
+    void rebuildList();
+    void chooseFromList (int itemId);
+    void stepList (int delta);
+    void askNameAndSave();
+    void showFolderMenu();
+    void chooseFolder (bool forSamples);
 
     DrikSamplerProcessor& processor;
 
-    juce::Label title, versionLabel, fileLabel, octaveLabel;
+    juce::Label title, versionLabel, octaveLabel;
     juce::ComboBox programBox;
     MapView mapView;
     bool refreshing = false;
-    juce::TextButton openButton;
+    int chosenIndex = -1;          // item da lista que o usuario escolheu por ultimo (-1 = veio de fora da lista)
+    juce::TextButton openButton, saveButton { "Salvar..." }, folderButton { "Pastas..." }, prevButton { "<" }, nextButton { ">" };
+    juce::ComboBox instrumentBox;
+    juce::Array<juce::File> favorites;
+    std::vector<DrikSamplerProcessor::LibraryEntry> library;
+    juce::TooltipWindow tooltips { this, 600 };
     juce::ToggleButton loopButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopAttachment;
     WaveformView waveform;

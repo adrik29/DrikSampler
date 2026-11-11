@@ -320,16 +320,32 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     versionLabel.setColour (juce::Label::textColourId, dimColour);
     addAndMakeVisible (versionLabel);
 
-    fileLabel.setColour (juce::Label::textColourId, textColour);
-    fileLabel.setFont (juce::FontOptions (15.0f));
-    fileLabel.setJustificationType (juce::Justification::centredRight);
-    addAndMakeVisible (fileLabel);
+    // Lista de instrumentos: os favoritos salvos e tudo o que existe na pasta dos samples.
+    instrumentBox.setColour (juce::ComboBox::backgroundColourId, panelColour);
+    instrumentBox.setColour (juce::ComboBox::textColourId, textColour);
+    instrumentBox.setColour (juce::ComboBox::outlineColourId, accentColour.withAlpha (0.6f));
+    instrumentBox.setColour (juce::ComboBox::arrowColourId, accentColour);
+    instrumentBox.setTextWhenNothingSelected (utf8 ("nenhum som carregado"));
+    instrumentBox.setTooltip (utf8 ("Meus instrumentos: os que voc\xc3\xaa salvou, com a regulagem dos bot\xc3\xb5" "es. "
+                                    "Depois, tudo o que existe na pasta dos samples."));
+    instrumentBox.onChange = [this] { if (! refreshing) chooseFromList (instrumentBox.getSelectedId()); };
+    addAndMakeVisible (instrumentBox);
 
     openButton.setButtonText ("Abrir...");
-    openButton.setColour (juce::TextButton::buttonColourId, panelColour);
-    openButton.setColour (juce::TextButton::textColourOffId, textColour);
     openButton.onClick = [this] { openFile(); };
-    addAndMakeVisible (openButton);
+    saveButton.onClick = [this] { askNameAndSave(); };
+    saveButton.setTooltip (utf8 ("Guarda o instrumento que est\xc3\xa1 carregado junto com a posi\xc3\xa7\xc3\xa3" "o de todos os bot\xc3\xb5" "es, com o nome que voc\xc3\xaa der."));
+    folderButton.onClick = [this] { showFolderMenu(); };
+    folderButton.setTooltip (utf8 ("Escolhe a pasta onde ficam os samples e a pasta onde ficam os instrumentos salvos."));
+    prevButton.onClick = [this] { stepList (-1); };
+    nextButton.onClick = [this] { stepList (1); };
+
+    for (auto* b : { &openButton, &saveButton, &folderButton, &prevButton, &nextButton })
+    {
+        b->setColour (juce::TextButton::buttonColourId, panelColour);
+        b->setColour (juce::TextButton::textColourOffId, textColour);
+        addAndMakeVisible (*b);
+    }
 
     loopButton.setButtonText ("Loop");
     loopButton.setColour (juce::ToggleButton::textColourId, textColour);
@@ -391,7 +407,7 @@ DrikSamplerEditor::DrikSamplerEditor (DrikSamplerProcessor& p)
     addAndMakeVisible (keyboard);
 
     processor.addChangeListener (this);
-    refreshFromProcessor();
+    rebuildList();
 
     setSize (980, 580);
 }
@@ -413,11 +429,17 @@ void DrikSamplerEditor::resized()
     auto top = area.removeFromTop (34);
     title.setBounds (top.removeFromLeft (140));
     versionLabel.setBounds (top.removeFromLeft (150).withTrimmedTop (5));
-    openButton.setBounds (top.removeFromRight (90).reduced (0, 3));
-    top.removeFromRight (10);
-    loopButton.setBounds (top.removeFromRight (74));
-    top.removeFromRight (10);
-    fileLabel.setBounds (top);
+    openButton.setBounds (top.removeFromRight (80).reduced (0, 3));
+    top.removeFromRight (6);
+    folderButton.setBounds (top.removeFromRight (80).reduced (0, 3));
+    top.removeFromRight (6);
+    saveButton.setBounds (top.removeFromRight (80).reduced (0, 3));
+    top.removeFromRight (12);
+    nextButton.setBounds (top.removeFromRight (30).reduced (0, 3));
+    top.removeFromRight (4);
+    prevButton.setBounds (top.removeFromLeft (30).reduced (0, 3));
+    top.removeFromLeft (4);
+    instrumentBox.setBounds (top.reduced (0, 3));
 
     area.removeFromTop (10);
     octaveLabel.setBounds (area.removeFromBottom (18));
@@ -430,6 +452,8 @@ void DrikSamplerEditor::resized()
     waveform.setBounds (area);
     mapView.setBounds (area);
     programBox.setBounds (area.getRight() - 296, area.getY() + 12, 280, 26);
+    loopButton.setBounds (area.getRight() - 84, area.getY() + 8, 74, 24);
+    loopButton.toFront (false);
 
     const int w = knobRow.getWidth() / juce::jmax (1, knobs.size());
     for (auto* k : knobs)
@@ -473,10 +497,174 @@ void DrikSamplerEditor::refreshFromProcessor()
     programBox.setVisible (multi && i.programs.size() > 1);
     refreshing = false;
 
-    juce::String text = i.mode == InstrumentInfo::empty ? utf8 ("nenhum som carregado") : i.name;
+    // A lista mostra o nome do instrumento em uso; se for um dos itens, fica selecionado.
+    refreshing = true;
+    juce::String text = i.mode == InstrumentInfo::empty ? juce::String() : i.name;
     if (! multi && i.message.isNotEmpty())
         text = i.message;
-    fileLabel.setText (text, juce::dontSendNotification);
+
+    int match = -1;
+    for (int k = 0; k < instrumentBox.getNumItems(); ++k)
+        if (instrumentBox.getItemText (k) == text)
+        {
+            match = k;
+            break;
+        }
+
+    const bool showingMessage = ! multi && i.message.isNotEmpty();
+
+    if (match >= 0)
+        instrumentBox.setSelectedItemIndex (match, juce::dontSendNotification);
+    else if (chosenIndex >= 0 && chosenIndex < instrumentBox.getNumItems() && ! showingMessage)
+        instrumentBox.setSelectedItemIndex (chosenIndex, juce::dontSendNotification);
+    else
+    {
+        instrumentBox.setSelectedId (0, juce::dontSendNotification);
+        instrumentBox.setText (text, juce::dontSendNotification);
+    }
+    refreshing = false;
+}
+
+//==============================================================================
+// Itens da lista: 1..N sao os favoritos; de 10001 em diante, as entradas da biblioteca.
+static constexpr int libraryIdBase = 10001;
+
+void DrikSamplerEditor::rebuildList()
+{
+    refreshing = true;
+    instrumentBox.clear (juce::dontSendNotification);
+
+    favorites = DrikSamplerProcessor::favoriteFiles();
+    if (! favorites.isEmpty())
+    {
+        instrumentBox.addSectionHeading ("Meus instrumentos");
+        for (int i = 0; i < favorites.size(); ++i)
+            instrumentBox.addItem (favorites[i].getFileNameWithoutExtension(), i + 1);
+    }
+
+    library = processor.scanLibrary();
+    juce::String group;
+    for (int i = 0; i < (int) library.size(); ++i)
+    {
+        if (group != library[(size_t) i].group)
+        {
+            group = library[(size_t) i].group;
+            instrumentBox.addSectionHeading (group);
+        }
+        instrumentBox.addItem (library[(size_t) i].label, libraryIdBase + i);
+    }
+
+    refreshing = false;
+    refreshFromProcessor();
+}
+
+void DrikSamplerEditor::chooseFromList (int itemId)
+{
+    chosenIndex = instrumentBox.getSelectedItemIndex();
+
+    if (itemId >= libraryIdBase)
+    {
+        const int i = itemId - libraryIdBase;
+        if (i < (int) library.size())
+            tryLoad (library[(size_t) i].files);
+    }
+    else if (itemId >= 1 && itemId <= favorites.size())
+    {
+        setMouseCursor (juce::MouseCursor::WaitCursor);
+        processor.loadFavorite (favorites[itemId - 1]);
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+    }
+}
+
+void DrikSamplerEditor::stepList (int delta)
+{
+    const int count = instrumentBox.getNumItems();
+    if (count == 0)
+        return;
+
+    const int current = instrumentBox.getSelectedItemIndex() >= 0 ? instrumentBox.getSelectedItemIndex() : chosenIndex;
+    const int next = current < 0 ? (delta > 0 ? 0 : count - 1) : (current + delta + count) % count;
+    instrumentBox.setSelectedItemIndex (next, juce::sendNotificationSync);
+}
+
+void DrikSamplerEditor::askNameAndSave()
+{
+    const auto info = processor.getInfo();
+    if (info.mode == InstrumentInfo::empty)
+    {
+        instrumentBox.setText (utf8 ("carregue um som antes de salvar"), juce::dontSendNotification);
+        return;
+    }
+
+    auto* w = new juce::AlertWindow ("Salvar instrumento", utf8 ("Nome do instrumento (guarda os samples e a regulagem dos bot\xc3\xb5" "es):"),
+                                     juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("name", info.name.upToLastOccurrenceOf (".", false, false).isNotEmpty() ? info.name.upToLastOccurrenceOf (".", false, false) : info.name);
+    w->addButton ("Salvar", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancelar", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    juce::Component::SafePointer<DrikSamplerEditor> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int result)
+    {
+        if (safe == nullptr || result != 1)
+            return;
+
+        const auto name = juce::File::createLegalFileName (w->getTextEditorContents ("name").trim());
+        if (name.isEmpty())
+            return;
+
+        const auto file = DrikSamplerProcessor::getFavoritesFolder().getChildFile (name + ".drikinst");
+        if (safe->processor.saveFavorite (file))
+        {
+            safe->chosenIndex = -1;
+            safe->rebuildList();
+        }
+        else
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Salvar instrumento",
+                                                    utf8 ("N\xc3\xa3" "o consegui gravar em:\n") + file.getFullPathName());
+    }), true);
+}
+
+void DrikSamplerEditor::showFolderMenu()
+{
+    const auto root = DrikSamplerProcessor::getSamplesRoot();
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Pasta dos samples");
+    menu.addItem (1, root != juce::File() ? root.getFullPathName() + "   (trocar...)" : utf8 ("ainda n\xc3\xa3" "o escolhida   (escolher...)"));
+    menu.addSectionHeader ("Pasta dos instrumentos salvos");
+    menu.addItem (2, DrikSamplerProcessor::getFavoritesFolder().getFullPathName() + "   (trocar...)");
+    menu.addSeparator();
+    menu.addItem (3, "Atualizar a lista");
+
+    juce::Component::SafePointer<DrikSamplerEditor> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (folderButton), [safe] (int choice)
+    {
+        if (safe == nullptr) return;
+        if (choice == 1) safe->chooseFolder (true);
+        if (choice == 2) safe->chooseFolder (false);
+        if (choice == 3) safe->rebuildList();
+    });
+}
+
+void DrikSamplerEditor::chooseFolder (bool forSamples)
+{
+    auto start = forSamples ? DrikSamplerProcessor::getSamplesRoot() : DrikSamplerProcessor::getFavoritesFolder();
+    if (! start.isDirectory())
+        start = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+
+    chooser = std::make_unique<juce::FileChooser> (forSamples ? utf8 ("Escolha a pasta onde ficam todos os samples")
+                                                              : utf8 ("Escolha a pasta para os instrumentos salvos"), start);
+
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [this, forSamples] (const juce::FileChooser& fc)
+                          {
+                              const auto folder = fc.getResult();
+                              if (! folder.isDirectory())
+                                  return;
+
+                              if (forSamples) DrikSamplerProcessor::setSamplesRoot (folder);
+                              else            DrikSamplerProcessor::setFavoritesFolder (folder);
+                              rebuildList();
+                          });
 }
 
 void DrikSamplerEditor::tryLoad (const juce::Array<juce::File>& files)
@@ -486,7 +674,7 @@ void DrikSamplerEditor::tryLoad (const juce::Array<juce::File>& files)
     setMouseCursor (juce::MouseCursor::NormalCursor);
 
     if (! ok && processor.getInfo().message.isEmpty() && ! files.isEmpty())
-        fileLabel.setText (utf8 ("N\xc3\xa3" "o consegui abrir: ") + files.getFirst().getFileName(), juce::dontSendNotification);
+        instrumentBox.setText (utf8 ("N\xc3\xa3" "o consegui abrir: ") + files.getFirst().getFileName(), juce::dontSendNotification);
 }
 
 void DrikSamplerEditor::filesDropped (const juce::StringArray& files, int, int)
@@ -497,6 +685,7 @@ void DrikSamplerEditor::filesDropped (const juce::StringArray& files, int, int)
     juce::Array<juce::File> list;
     for (const auto& f : files)
         list.add (juce::File (f));
+    chosenIndex = -1;
     tryLoad (list);
 }
 
@@ -515,6 +704,9 @@ void DrikSamplerEditor::openFile()
                           {
                               const auto chosen = fc.getResults();
                               if (! chosen.isEmpty())
+                              {
+                                  chosenIndex = -1;
                                   tryLoad (chosen);
+                              }
                           });
 }

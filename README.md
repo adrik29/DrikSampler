@@ -35,6 +35,17 @@ Em **Releases**, à direita desta página, fica sempre a última compilação:
 - O projeto do Reaper guarda o instrumento carregado e a posição dos botões
 - O número da versão aparece ao lado do título
 
+## Favoritos e biblioteca
+
+- **Pastas...** define a pasta dos samples (a pasta-mãe, com todas as bibliotecas dentro) e a pasta dos
+  instrumentos salvos.
+- A lista no alto mostra **Meus instrumentos** (os salvos) e depois tudo o que existe na pasta dos samples:
+  cada `.sfz`, cada pasta de samples com nome de nota (um instrumento só) e cada som avulso.
+- **Salvar...** guarda o instrumento carregado junto com a posição de todos os botões, menos a sensibilidade,
+  que depende do teclado de quem toca. Cada instrumento salvo é um arquivo `.drikinst`.
+- Os caminhos são guardados a partir da pasta dos samples. Se ela mudar de disco ou de lugar, basta apontar
+  a nova em **Pastas...**: os instrumentos salvos e os projetos do Reaper continuam abrindo.
+
 ## Bibliotecas
 
 Qualquer biblioteca em SFZ simples deve abrir. Testado com duas coleções gratuitas de samples de mellotron:

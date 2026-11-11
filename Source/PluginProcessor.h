@@ -162,6 +162,33 @@ public:
     InstrumentInfo getInfo() const;
     juce::File getCurrentFile() const;
 
+    //==========================================================================
+    // Pasta-mae dos samples e favoritos (ajustes do usuario, valem para todas as janelas do DrikSampler).
+
+    /** Pasta onde ficam todas as bibliotecas. Caminhos dentro dela sao guardados a partir dela,
+        entao mover a pasta inteira so exige apontar o novo lugar. */
+    static juce::File getSamplesRoot();
+    static void setSamplesRoot (const juce::File&);
+
+    /** Pasta dos favoritos: um arquivo .drikinst por instrumento salvo. */
+    static juce::File getFavoritesFolder();
+    static void setFavoritesFolder (const juce::File&);
+    static juce::Array<juce::File> favoriteFiles();
+
+    /** Salva o instrumento atual com a regulagem dos botoes; carrega de volta os dois juntos. */
+    bool saveFavorite (const juce::File&);
+    bool loadFavorite (const juce::File&);
+
+    /** Um item da biblioteca: um .sfz, uma pasta de samples com nome de nota, ou um som avulso. */
+    struct LibraryEntry
+    {
+        juce::String label, group;
+        juce::Array<juce::File> files;
+    };
+
+    /** Varre a pasta-mae e lista tudo o que da para abrir. */
+    std::vector<LibraryEntry> scanLibrary() const;
+
     juce::AudioProcessorValueTreeState apvts;
     juce::MidiKeyboardState keyboardState;
     juce::AudioFormatManager formatManager;
@@ -173,6 +200,10 @@ private:
     int installZones (const std::vector<ZoneDesc>&, juce::String& problem, std::vector<InstrumentInfo::Zone>& installed);
     void setInfo (const InstrumentInfo&);
     void setParam (const char* id, float value);
+    juce::ValueTree buildState() const;
+    bool applyState (juce::ValueTree);
+    static juce::String toPortable (const juce::File&);
+    static juce::File fromPortable (const juce::String&);
 
     SamplerEngine synth;
     std::vector<ZoneDesc> fileZones;          // so no modo 'files', para salvar no projeto
